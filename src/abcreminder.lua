@@ -21,6 +21,9 @@ ABCReminderDB = ABCReminderDB or {
     soundChannel = "Master",
     soundFile = "WaterDrop",
 }
+-- =========================
+-- sound files
+-- =========================
 local soundFiles = {
         ["WaterDrop"]="Interface\\AddOns\\ABCReminder\\sound\\WaterDrop.ogg",
         ["SharpPunch"]="Interface\\AddOns\\ABCReminder\\sound\\SharpPunch.ogg",
@@ -76,6 +79,7 @@ end)
 local CHECK_INTERVAL = 0.1
 local checkElapsed = 0
 local soundElapsed = 0
+local wasEligible = false
 
 frame:SetScript("OnUpdate", function(_, delta)
     if not ABCReminderDB.enabled then return end
@@ -84,11 +88,19 @@ frame:SetScript("OnUpdate", function(_, delta)
     if checkElapsed < CHECK_INTERVAL then return end
     checkElapsed = 0
 
-    if not inCombat
-        or not IsInstanceEnabled()
-        or IsPlayerCasting()
-        or IsGCDBlocking()
-    then
+    local eligible = inCombat
+        and IsInstanceEnabled()
+        and not IsPlayerCasting()
+        and not IsGCDBlocking()
+    if not eligible then
+        wasEligible = false    
+        soundElapsed = 0
+        return
+    end
+
+    if not wasEligible then
+        PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
+        wasEligible = true
         soundElapsed = 0
         return
     end
