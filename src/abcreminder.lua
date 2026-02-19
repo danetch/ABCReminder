@@ -10,7 +10,7 @@ ABCReminderDB = ABCReminderDB or {
         scenario = true,
         arena = false,
         pvp = false,
---        none = false,
+        none = false,
         neighborhood = false,
         interior = false,
     },
@@ -54,7 +54,7 @@ end
 
 local function IsInstanceEnabled()
     local inInstance, instanceType = IsInInstance()
-    if not inInstance then return false end
+    if not inInstance then return ABCReminderDB.enabledInstances.none end
     return ABCReminderDB.enabledInstances[instanceType]
 end
 
