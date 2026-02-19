@@ -19,8 +19,12 @@ ABCReminderDB = ABCReminderDB or {
         remindersPlayed = 0,
     },
     soundChannel = "Master",
-    soundFile = "Interface\\AddOns\\ABCReminder\\sound\\WaterDrop.ogg",
+    soundFile = "WaterDrop",
 }
+local soundFiles = {
+        ["WaterDrop"]="Interface\\AddOns\\ABCReminder\\sound\\WaterDrop.ogg",
+        ["SharpPunch"]="Interface\\AddOns\\ABCReminder\\sound\\SharpPunch.ogg",
+    }
 
 -- =========================
 -- Helpers
@@ -91,7 +95,7 @@ frame:SetScript("OnUpdate", function(_, delta)
 
     soundElapsed = soundElapsed + CHECK_INTERVAL
     if soundElapsed >= ABCReminderDB.soundInterval then
-        PlaySoundFile(ABCReminderDB.soundFile, ABCReminderDB.soundChannel)
+        PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
         soundElapsed = 0
     end
 end)
@@ -154,7 +158,11 @@ panel:SetScript("OnShow", function(self)
         ABCReminderDB.enabled = cb:GetChecked()
     end)
 
-    local y = -90
+    local separator = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    separator:SetPoint("TOPLEFT", enable, "BOTTOMLEFT", 0, -16)
+    separator:SetText("Enable in instances:")
+
+    local y = -108
     for inst in pairs(ABCReminderDB.enabledInstances) do
         local cb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
         cb:SetPoint("TOPLEFT", 16, y)
@@ -167,7 +175,7 @@ panel:SetScript("OnShow", function(self)
     end
 
     local slider = CreateFrame("Slider", nil, self, "OptionsSliderTemplate")
-    slider:SetPoint("TOPLEFT", 16, y - 10)
+    slider:SetPoint("TOPLEFT", 16, y - 16)
     slider:SetMinMaxValues(1, 10)
     slider:SetValueStep(0.5)
     slider:SetValue(ABCReminderDB.soundInterval)
@@ -179,74 +187,52 @@ panel:SetScript("OnShow", function(self)
         ABCReminderDB.soundInterval = val
     end)
 
-    -- Sound Options Section
-    y = y - 80
-    local soundTitle = self:CreateFontString(nil, "OVERLAY", "GameFontNormalMedium")
-    soundTitle:SetPoint("TOPLEFT", 16, y)
-    soundTitle:SetText("Sound Options")
-
-    -- Sound Channel Dropdown
-    y = y - 30
     local channelLabel = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    channelLabel:SetPoint("TOPLEFT", 16, y)
-    channelLabel:SetText("Audio Channel:")
+    channelLabel:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 0, -16)
+    channelLabel:SetText("Sound Channel:")
 
-    local soundChannels = { "Master", "SFX", "Music", "Ambience", "Dialog" }
-    local channelDropdown = CreateFrame("Frame", nil, self, "UIDropDownMenuTemplate")
-    channelDropdown:SetPoint("TOPLEFT", 150, y)
-    UIDropDownMenu_SetWidth(channelDropdown, 80)
-    UIDropDownMenu_SetButtonWidth(channelDropdown, 94)
-    UIDropDownMenu_Initialize(channelDropdown, function(frame, level)
+
+    local soundChannels = {"Master", "SFX", "Music", "Ambience"}
+    local channelDropdown = CreateFrame("Frame", "ABCReminderChannelDropdown", self, "UIDropDownMenuTemplate")
+    channelDropdown:SetPoint("TOPLEFT", channelLabel, "BOTTOMLEFT", 0, -16)
+    channelDropdown.initialize = function(self, level)
+        local info = UIDropDownMenu_CreateInfo()
+        info.func = function(_, arg1)
+            ABCReminderDB.soundChannel = arg1
+            UIDropDownMenu_SetSelectedValue(channelDropdown, arg1)
+        end
         for _, channel in ipairs(soundChannels) do
-            local info = UIDropDownMenu_CreateInfo()
             info.text = channel
-            info.value = channel
-            info.func = function()
-                ABCReminderDB.soundChannel = channel
-                UIDropDownMenu_SetSelectedValue(channelDropdown, channel)
-            end
+            info.arg1 = channel
+            info.checked = (ABCReminderDB.soundChannel == channel)
             UIDropDownMenu_AddButton(info, level)
         end
-    end)
-    UIDropDownMenu_SetSelectedValue(channelDropdown, ABCReminderDB.soundChannel)
+    end
+    UIDropDownMenu_SetText(channelDropdown, ABCReminderDB.soundChannel)
 
-    -- Sound File Selection
-    y = y - 30
-    local soundFileLabel = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    soundFileLabel:SetPoint("TOPLEFT", 16, y)
-    soundFileLabel:SetText("Sound File:")
-
-    local soundFiles = {
-        { name = "Water Drop", path = "Interface\\AddOns\\ABCReminder\\sound\\WaterDrop.ogg" },
-    }
-
-    local soundDropdown = CreateFrame("Frame", nil, self, "UIDropDownMenuTemplate")
-    soundDropdown:SetPoint("TOPLEFT", 150, y)
-    UIDropDownMenu_SetWidth(soundDropdown, 120)
-    UIDropDownMenu_SetButtonWidth(soundDropdown, 134)
-    UIDropDownMenu_Initialize(soundDropdown, function(frame, level)
-        for _, sound in ipairs(soundFiles) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = sound.name
-            info.value = sound.path
-            info.func = function()
-                ABCReminderDB.soundFile = sound.path
-                UIDropDownMenu_SetSelectedValue(soundDropdown, sound.path)
-            end
+    local soundLabel = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    soundLabel:SetPoint("TOPLEFT", channelDropdown, "BOTTOMLEFT", 0, -16)
+    soundLabel:SetText("Sound File:")
+    
+    local soundDropdown = CreateFrame("Frame", "ABCReminderSoundDropdown", self, "UIDropDownMenuTemplate")
+    soundDropdown:SetPoint("TOPLEFT", soundLabel, "BOTTOMLEFT", 0, -16)
+    soundDropdown.initialize = function(self, level)
+        local info = UIDropDownMenu_CreateInfo()
+        info.func = function(_, arg1)
+            ABCReminderDB.soundFile = arg1
+            UIDropDownMenu_SetSelectedValue(soundDropdown, arg1)
+        end
+        for name, file in pairs(soundFiles) do
+            info.text = name
+            info.arg1 = name
+            info.checked = (ABCReminderDB.soundFile == name)
             UIDropDownMenu_AddButton(info, level)
         end
-    end)
-    UIDropDownMenu_SetSelectedValue(soundDropdown, ABCReminderDB.soundFile)
+    end
+    UIDropDownMenu_SetText(soundDropdown, ABCReminderDB.soundFile)
+ 
 
-    -- Test Sound Button
-    y = y - 30
-    local testButton = CreateFrame("Button", nil, self, "GameMenuButtonTemplate")
-    testButton:SetPoint("TOPLEFT", 16, y)
-    testButton:SetSize(120, 25)
-    testButton:SetText("Test Sound")
-    testButton:SetScript("OnClick", function()
-        PlaySoundFile(ABCReminderDB.soundFile, ABCReminderDB.soundChannel)
-    end)
+
 end)
 local category, layout = Settings.RegisterCanvasLayoutCategory(panel, panel.name, panel.name);
 category.ID = panel.name;
