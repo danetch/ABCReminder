@@ -10,7 +10,7 @@ ABCReminderDB = ABCReminderDB or {
         scenario = true,
         arena = false,
         pvp = false,
-        none = false,
+--        none = false,
         neighborhood = false,
         interior = false,
     },
