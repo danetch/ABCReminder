@@ -1,0 +1,11 @@
+## Interface: 120001, 120000
+## Title: ABC Reminder
+## Notes: Reminds you to always be casting your spells
+## Version: 12.0.1
+## Author: Danetch
+## SavedVariables: ABCReminderDB
+## Category: Combat
+## Dependencies: 
+
+src/abcreminder.lua
+src/utils.lua
