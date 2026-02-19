@@ -40,18 +40,20 @@ local function IsGCDBlocking()
     local cd = C_Spell.GetSpellCooldown(61304)
     if not cd or cd.startTime == 0 then
         return false
+    else
+        return true
     end
+-- spell queue window cannot be used ./ commenting
 
-    local now = GetTime()
-    local remaining = (cd.startTime + cd.duration) - now
-    local queueWindow = tonumber(GetCVar("SpellQueueWindow")) / 1000
+    -- local now = GetTime()
+    -- local remaining = (cd.startTime + cd.duration) - now
+    -- local queueWindow = tonumber(GetCVar("SpellQueueWindow")) / 1000
 
-    return remaining > queueWindow
+    -- return remaining > queueWindow
 end
 
 local function IsInstanceEnabled()
     local inInstance, instanceType = IsInInstance()
-    print("Instance check:", inInstance, instanceType)
     if not inInstance then return false end
     return ABCReminderDB.enabledInstances[instanceType]
 end
@@ -104,7 +106,7 @@ frame:SetScript("OnUpdate", function(_, delta)
         soundElapsed = 0
         return
     end
-
+-- This part runs every CHECK_INTERVAL while eligible, so we accumulate time and play sound when it exceeds the interval
     soundElapsed = soundElapsed + CHECK_INTERVAL
     if soundElapsed >= ABCReminderDB.soundInterval then
         PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
