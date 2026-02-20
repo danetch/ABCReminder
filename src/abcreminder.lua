@@ -3,6 +3,7 @@
 -- =========================
 ABCReminderDB = ABCReminderDB or {
     enabled = true,
+    clipSound = true,
     soundInterval = 1.0,
     enabledInstances = {
         party = true,
@@ -14,13 +15,10 @@ ABCReminderDB = ABCReminderDB or {
         neighborhood = false,
         interior = false,
     },
-    statistics = {
-        totalCombatTime = 0,
-        remindersPlayed = 0,
-    },
     soundChannel = "Master",
     soundFile = "WaterDrop",
 }
+CharABCRDB = CharABCRDB or {}
 -- =========================
 -- sound files
 -- =========================
@@ -28,7 +26,6 @@ local soundFiles = {
         ["WaterDrop"]="Interface\\AddOns\\ABCReminder\\sound\\WaterDrop.ogg",
         ["SharpPunch"]="Interface\\AddOns\\ABCReminder\\sound\\SharpPunch.ogg",
     }
-
 -- =========================
 -- Helpers
 -- =========================
@@ -54,7 +51,7 @@ end
 
 local function IsInstanceEnabled()
     local inInstance, instanceType = IsInInstance()
-    if not inInstance then return ABCReminderDB.enabledInstances.none end
+    if not inInstance then return ABCReminderDB.enabledInstances.none end -- trea
     return ABCReminderDB.enabledInstances[instanceType]
 end
 
@@ -82,12 +79,18 @@ local CHECK_INTERVAL = 0.1
 local checkElapsed = 0
 local soundElapsed = 0
 local wasEligible = false
+local soundHandle = nil
 
 frame:SetScript("OnUpdate", function(_, delta)
     if not ABCReminderDB.enabled then return end
-
     checkElapsed = checkElapsed + delta
-    if checkElapsed < CHECK_INTERVAL then return end
+    if checkElapsed < CHECK_INTERVAL then
+        if ABCReminderDB.clipSound and soundHandle and inCombat and IsInstanceEnabled() and (IsPlayerCasting() or IsGCDBlocking()) then
+            StopSound(soundHandle)
+            soundHandle = nil
+        end
+        return 
+    end
     checkElapsed = 0
 
     local eligible = inCombat
@@ -101,7 +104,7 @@ frame:SetScript("OnUpdate", function(_, delta)
     end
 
     if not wasEligible then
-        PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
+        _, soundHandle = PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
         wasEligible = true
         soundElapsed = 0
         return
@@ -109,7 +112,7 @@ frame:SetScript("OnUpdate", function(_, delta)
 -- This part runs every CHECK_INTERVAL while eligible, so we accumulate time and play sound when it exceeds the interval
     soundElapsed = soundElapsed + CHECK_INTERVAL
     if soundElapsed >= ABCReminderDB.soundInterval then
-        PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
+        _, soundHandle = PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
         soundElapsed = 0
     end
 end)
@@ -156,6 +159,7 @@ end
 local panel = CreateFrame("Frame", "ABCReminderOptions", InterfaceOptionsFramePanelContainer)
 panel.name = "ABCReminder"
 
+
 panel:SetScript("OnShow", function(self)
     if self.init then return end
     self.init = true
@@ -176,20 +180,39 @@ panel:SetScript("OnShow", function(self)
     separator:SetPoint("TOPLEFT", enable, "BOTTOMLEFT", 0, -16)
     separator:SetText("Enable in instances:")
 
+    local decor = self:CreateTexture(nil, "BACKGROUND")
+    decor:SetTexture("Interface\\AddOns\\ABCReminder\\img\\drops.tga")
+    decor:SetPoint("BOTTOMRIGHT")
+    --decor:SetTexCoord(0.5,0.5,0.5,1,0.5,1,1,1)
+
+
+
     local y = -108
+    local i = 1
     for inst in pairs(ABCReminderDB.enabledInstances) do
         local cb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
-        cb:SetPoint("TOPLEFT", 16, y)
-        cb.Text:SetText("Enable in " .. inst)
+        if i%2 ~= 0 then
+            cb:SetPoint("TOPLEFT", 16, y)
+        else
+            cb:SetPoint("TOPLEFT", 16 + 150, y)
+            y = y - 30
+        end
+        i = i + 1
+        if inst == "none" then cb.Text:SetText("open world") else cb.Text:SetText(inst) end
         cb:SetChecked(ABCReminderDB.enabledInstances[inst])
         cb:SetScript("OnClick", function(btn)
             ABCReminderDB.enabledInstances[inst] = btn:GetChecked()
         end)
-        y = y - 30
+        
     end
 
+
+    local soundLabel = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    soundLabel:SetPoint("TOPLEFT", 16, y-16)
+    soundLabel:SetText("Sound options:")
+
     local slider = CreateFrame("Slider", nil, self, "OptionsSliderTemplate")
-    slider:SetPoint("TOPLEFT", 16, y - 16)
+    slider:SetPoint("TOPLEFT", soundLabel, "BOTTOMLEFT", 8, -20)
     slider:SetMinMaxValues(1, 10)
     slider:SetValueStep(0.5)
     slider:SetValue(ABCReminderDB.soundInterval)
@@ -200,15 +223,23 @@ panel:SetScript("OnShow", function(self)
     slider:SetScript("OnValueChanged", function(_, val)
         ABCReminderDB.soundInterval = val
     end)
-
-    local channelLabel = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    channelLabel:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 0, -16)
-    channelLabel:SetText("Sound Channel:")
-
-
+    local valueText = slider:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    valueText:SetPoint("TOP", slider, "BOTTOM", -8, -4)
+    slider:SetScript("OnValueChanged", function(_, val)
+        ABCReminderDB.soundInterval = val
+        valueText:SetText(string.format("%.1f seconds", val))
+    end)
+    valueText:SetText(string.format("%.1f seconds", ABCReminderDB.soundInterval))
+    local soundClipSetting = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
+    soundClipSetting:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", -8, -20)
+    soundClipSetting.Text:SetText("Stop sound when casting resumes")
+    soundClipSetting:SetChecked(ABCReminderDB.clipSound)
+    soundClipSetting:SetScript("OnClick", function(cb)
+        ABCReminderDB.clipSound = cb:GetChecked()
+    end)
     local soundChannels = {"Master", "SFX", "Music", "Ambience"}
     local channelDropdown = CreateFrame("Frame", "ABCReminderChannelDropdown", self, "UIDropDownMenuTemplate")
-    channelDropdown:SetPoint("TOPLEFT", channelLabel, "BOTTOMLEFT", 0, -16)
+    channelDropdown:SetPoint("TOPLEFT", soundClipSetting, "BOTTOMLEFT", -16, -16)
     channelDropdown.initialize = function(self, level)
         local info = UIDropDownMenu_CreateInfo()
         info.func = function(_, arg1)
@@ -223,13 +254,9 @@ panel:SetScript("OnShow", function(self)
         end
     end
     UIDropDownMenu_SetText(channelDropdown, ABCReminderDB.soundChannel)
-
-    local soundLabel = self:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    soundLabel:SetPoint("TOPLEFT", channelDropdown, "BOTTOMLEFT", 0, -16)
-    soundLabel:SetText("Sound File:")
     
     local soundDropdown = CreateFrame("Frame", "ABCReminderSoundDropdown", self, "UIDropDownMenuTemplate")
-    soundDropdown:SetPoint("TOPLEFT", soundLabel, "BOTTOMLEFT", 0, -16)
+    soundDropdown:SetPoint("TOPLEFT", channelDropdown, "BOTTOMLEFT", 0, -16)
     soundDropdown.initialize = function(self, level)
         local info = UIDropDownMenu_CreateInfo()
         info.func = function(_, arg1)
