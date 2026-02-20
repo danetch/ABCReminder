@@ -6,7 +6,6 @@
 ## SavedVariables: ABCReminderDB
 ## CharSavedVariables: CharABCRDB
 ## Category: Combat
-## Dependencies: 
+## Dependencies:
 
 src/abcreminder.lua
-src/utils.lua

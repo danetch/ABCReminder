@@ -1,35 +1,58 @@
-# ABC Reminder - Always Be Casting
+ABCReminder
 
-## Overview
-ABC Reminder is a World of Warcraft addon that helps you maintain optimal DPS by reminding you to **always be casting**. When you're in combat within an instance but not actively casting a spell, the addon will play an audio alert to prompt you to get back to casting.
+ABCReminder is a World of Warcraft optimization tool designed to help players maximize their uptime (Always Be Casting) and perfect their Spell Queue Window (SQW) management.
+🚀 Key Features
+1. Activity Reminder (Always Be Casting)
 
-## Installation
-1. Download or clone the addon files.
-2. Extract the contents into your World of Warcraft `Interface/AddOns` directory.
-3. Reload your UI or restart WoW for the addon to load.
+    Smart Detection: Monitors in real-time if you are currently casting, channeling, or if the Global Cooldown (GCD) is active.
 
-## Usage
-The addon activates automatically when you enter combat in a supported instance (raids, dungeons, scenarios, etc.). If you're standing idle without casting while the Global Cooldown is ready, you'll hear a water drop sound reminder.
+    Audio Alerts: If you are idle during combat, a sound triggers at regular intervals to remind you to use a capability.
 
-## Features
-- **Combat-aware reminders**: Only alerts you when actually in combat in instances
-- **Configurable instance types**: Choose which instance types trigger reminders (raids, dungeons, scenarios, arenas, etc.)
-- **Smart cooldown detection**: Won't alert you if the Global Cooldown is still active
-- **Customizable sound**: Configure which sound file and audio channel to use
-- **Adjustable reminder frequency**: Set how often you want to be reminded while idle
-- **Instance filtering**: Enable/disable reminders for different instance types
-- **Combat statistics**: Tracks total combat time and number of reminders played
+    Customizable Interval: Adjust the sound frequency from 0.5s to 5.0s via the options menu.
 
-## Configuration
-The addon saves settings in `ABCReminderDB`. You can modify:
-- **enabled**: Turn the addon on/off
-- **soundInterval**: Frequency of reminders (in seconds)
-- **soundFile**: Path to the sound file
-- **soundChannel**: Audio channel (Master, SFX, Music, Ambience, Dialog)
-- **enabledInstances**: Toggle reminders for specific instance types
+    Sound Clipping: Automatically stops the reminder sound as soon as you start a cast, preventing unnecessary noise.
 
-## Contributing
-Feel free to fork the repository and submit a pull request with improvements.
+2. Spell Queue Window (SQW) Visual
 
-## License
-This addon is licensed under the MIT License. See the LICENSE file for more details.
+    Timing Assistance: A segmented circular UI element indicates exactly when the game engine will accept your next spell input.
+
+    Countdown Logic: The circle appears full at the start of the SQW and loses segments as time runs out.
+
+    Adaptive Segments: Automatically calculates the number of segments based on your system SpellQueueWindow setting (1 segment per 100ms).
+
+    "Always Show" Mode: Optional setting to keep the visual visible as a dim gray circle during the entire GCD/Cast, lighting up in bright green only when the input window opens.
+
+3. Performance Tracking & Statistics
+
+    Persistent Records: Automatically saves your best "Idle Time" ratios for Raid Bosses and Mythic+ completions.
+
+    Record Fanfare: Triggers a special sound and a celebratory chat message when you beat your personal activity record on a boss.
+
+    Session Mode (Trivial Content): For Open World or Normal/Heroic dungeons, stats are tracked for the current session only. This allows you to monitor performance without polluting your high-end records.
+
+4. Customization & UI
+
+    Comprehensive Options Panel: Integrated into the standard WoW Interface menu, featuring custom graphics (drops.tga).
+
+    Instance Filtering: Choose exactly where the addon should be active (Raid, Party, Scenarios, or Open World).
+
+    Audio Management: Select your preferred output channel (Master, SFX, Music, or Ambience) and choose between different sound files.
+
+    Movable UI: The SQW visual can be unlocked and repositioned anywhere on your screen.
+
+⌨️ Slash Commands
+Command	Description
+/ar	Opens the ABCReminder configuration panel.
+/ar move	Toggles "Move Mode" for the SQW visual (appears blue when movable).
+/ar reset session	Manually resets the current trivial content session statistics.
+🛠 Installation
+
+    Download the repository.
+
+    Place the ABCReminder folder into your World of Warcraft/_retail_/Interface/AddOns/ directory.
+
+    Ensure the sound/ and img/ folders are present within the addon directory.
+
+    Restart World of Warcraft.
+
+Current Status: Development in progress. Refining SQW segment transitions and visual feedback.
