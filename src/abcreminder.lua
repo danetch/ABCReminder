@@ -14,7 +14,10 @@ ABCReminderDB = ABCReminderDB or {
     soundFile = "WaterDrop",
     sqwPosition = { point = "CENTER", x = 0, y = -150 },
     statsPosition = { point = "LEFT",   x = 40, y = 0    },
+    intervalStatsDisplay = 15,
+
 }
+ABCReminderDB.intervalStatsDisplay = ABCReminderDB.intervalStatsDisplay or 15
 ABCReminderDB.sqwPosition   = ABCReminderDB.sqwPosition   or { point = "CENTER", x = 0,  y = -150 }
 ABCReminderDB.statsPosition = ABCReminderDB.statsPosition or { point = "LEFT",   x = 40, y = 0    }
 
@@ -109,12 +112,18 @@ local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersi
         if ratio < (data.bestRatio or 100) then
             data.bestRatio = ratio
             isNewRecord    = true
-            PlaySound(SOUNDKIT.UI_GARRISON_GUESST_GREETING, ABCReminderDB.soundChannel)
+            PlaySound(SOUNDKIT.UI_GARRISON_GUEST_GREETING, ABCReminderDB.soundChannel)
         end
 
         data.totalTime = data.totalTime + currentTotal
         data.idleTime  = data.idleTime  + currentIdle
         bestStr = string.format("|cff00ff00%.1f%%|r", data.bestRatio)
+        statsTable.content:SetText(string.format(
+        "Idle this run:  |cffffffff%.1f%%|r\n\nPersonal Best:  %s%s",
+        ratio,
+        bestStr,
+        isNewRecord and "\n\n|cffFFD700New Personal Record!|r" or ""
+    ))
     else
          -- Contenu trivial : on accumule dans la session persistante
         local st = CharABCRDB.sessionTrivial
@@ -123,6 +132,10 @@ local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersi
 
         local sessionRatio = st.totalTime > 0 and (st.idleTime / st.totalTime) * 100 or 0
         bestStr = string.format("|cffaaaaaa%.1f%% (session)|r", sessionRatio)
+        statsTable.content:SetText(string.format(
+        "Idle this run:  |cffffffff%.1f%%|r\n\nSession avg:  %s",
+        ratio, bestStr
+    ))
     end
 
     -- Titre : doré si record, blanc sinon
@@ -130,18 +143,13 @@ local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersi
         and "|cffFFD700★ " .. name .. " ★|r"
         or  name)
 
-    statsTable.content:SetText(string.format(
-        "Idle this run:  |cffffffff%.1f%%|r\n\nPersonal Best:  %s%s",
-        ratio,
-        bestStr,
-        isNewRecord and "\n\n|cffFFD700New Personal Record!|r" or ""
-    ))
-
     -- Ajuster la hauteur si record (ligne supplémentaire)
     statsTable:SetHeight(isNewRecord and 165 or 140)
 
     statsTable:Show()
-    C_Timer.After(15, function() statsTable:Hide() end)
+    if ABCReminderDB.intervalStatsDisplay and ABCReminderDB.intervalStatsDisplay > 0 then
+        C_Timer.After(ABCReminderDB.intervalStatsDisplay, function() statsTable:Hide() end)
+    end
 end
 
 
@@ -229,9 +237,11 @@ local inCombat, sessionCombatTime, sessionIdleTime = false, 0, 0
 local checkElapsed, soundElapsed, wasEligible, soundHandle = 0, 0, false, nil
 
 local function ProcessCombatEnd(encounterName)
-    local name, _, diffID = GetInstanceInfo()
-    local isPersist = (encounterName ~= nil) or (diffID == 8)
-    local key = encounterName and ("Boss: " .. encounterName) or name
+    local name, instanceType, diffID = GetInstanceInfo()
+    local isPersist = (instanceType == "raid" and encounterName ~= nil ) or (diffID == 8)
+    local diffName = GetDifficultyInfo(diffID) or tostring(diffID)
+    local key = encounterName and ("Boss: " .. encounterName .. " [" .. diffName .. "]") or name
+    
 
     ShowPerformanceTable(key, sessionIdleTime, sessionCombatTime, isPersist)
     sessionCombatTime, sessionIdleTime = 0, 0
@@ -393,6 +403,22 @@ end)
     alwaysCb:SetPoint("TOPLEFT", sqwCb, "BOTTOMLEFT", 20, -4); alwaysCb.Text:SetText("Always show (Grayed in combat)")
     alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW); alwaysCb:SetScript("OnClick", function(cb) ABCReminderDB.alwaysShowSQW = cb:GetChecked() end)
 end)
+
+     -- Slider de durée pour l'affichage des stats après combat, avec incréments 5 s de 0 à 30
+    local sl = CreateFrame("Slider", "ABCReminderStatsSlider", self, "OptionsSliderTemplate")
+    sl:SetPoint("TOPLEFT", alwaysCb, "BOTTOMLEFT", -20, -30)
+    sl:SetMinMaxValues(0, 30); sl:SetValueStep(5); sl:SetObeyStepOnDrag(true)
+    sl:SetValue(ABCReminderDB.intervalStatsDisplay)
+    sl.Text:SetText("Stats Display Interval (seconds) 0 means permanent")
+    sl.Low:SetText("0"); sl.High:SetText("30")
+    local valTxt = sl:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    valTxt:SetPoint("TOP", sl, "BOTTOM", 0, -2); valTxt:SetText(string.format("%.1f s", ABCReminderDB.intervalStatsDisplay))
+    sl:SetScript("OnValueChanged", function(_, v) ABCReminderDB.intervalStatsDisplay = v; valTxt:SetText(string.format("%.1f s", v)) end)
+
+    local clipCb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
+    clipCb:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", -8, -25); clipCb.Text:SetText("Stop sound when casting resumes")
+    clipCb:SetChecked(ABCReminderDB.clipSound); clipCb:SetScript("OnClick", function(cb) ABCReminderDB.clipSound = cb:GetChecked() end)
+
 
 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
 Settings.RegisterAddOnCategory(category)
