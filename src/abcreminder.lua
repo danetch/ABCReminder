@@ -17,16 +17,13 @@ ABCReminderDB = ABCReminderDB or {
     intervalStatsDisplay = 15,
 
 }
-ABCReminderDB.intervalStatsDisplay = ABCReminderDB.intervalStatsDisplay or 15
-ABCReminderDB.sqwPosition   = ABCReminderDB.sqwPosition   or { point = "CENTER", x = 0,  y = -150 }
-ABCReminderDB.statsPosition = ABCReminderDB.statsPosition or { point = "LEFT",   x = 40, y = 0    }
 
 CharABCRDB = CharABCRDB or {
     enabled = true,
     statistics = { perInstance = {} },
     sessionTrivial = { totalTime = 0, idleTime = 0 },
 }
-CharABCRDB.sessionTrivial = CharABCRDB.sessionTrivial or { totalTime = 0, idleTime = 0 }
+
 
 local isMovingSQW = false
 
@@ -254,6 +251,8 @@ frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 frame:SetScript("OnEvent", function(_, event, ...)
     if event == "PLAYER_ENTERING_WORLD" then
+        CharABCRDB.sessionTrivial = CharABCRDB.sessionTrivial or { totalTime = 0, idleTime = 0 }
+        ABCReminderDB.intervalStatsDisplay = ABCReminderDB.intervalStatsDisplay or 15
         local pos = ABCReminderDB.sqwPosition or { point = "CENTER", x = 0, y = -150 }
         sqwFrame:ClearAllPoints()
         sqwFrame:SetPoint(pos.point, UIParent, pos.point, pos.x, pos.y)
@@ -379,16 +378,6 @@ panel:SetScript("OnShow", function(self)
     testBtn:SetPoint("LEFT", sndDrop, "RIGHT", 10, 2); testBtn:SetSize(80, 22); testBtn:SetText("Test Sound")
     testBtn:SetScript("OnClick", function() PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel) end)
 
-    local resetPosBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-    resetPosBtn:SetPoint("TOPLEFT", sqwCb, "BOTTOMLEFT", 15, -30)
-    resetPosBtn:SetSize(130, 22)
-    resetPosBtn:SetText("Reset SQW Position")
-    resetPosBtn:SetScript("OnClick", function()
-    ABCReminderDB.sqwPosition = { point = "CENTER", x = 0, y = -150 }
-    sqwFrame:ClearAllPoints()
-    sqwFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -150)
-end)
-
     local sqwCb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
     sqwCb:SetPoint("TOPLEFT", sndDrop, "BOTTOMLEFT", 15, -15); sqwCb.Text:SetText("Show Spell Queue Window visual")
     sqwCb:SetChecked(ABCReminderDB.showSQW); sqwCb:SetScript("OnClick", function(cb) ABCReminderDB.showSQW = cb:GetChecked() end)
@@ -399,26 +388,34 @@ end)
     sqwMiniIcon:SetPoint("LEFT", sqwCb.Text, "RIGHT", 6, 0)
     sqwMiniIcon:SetVertexColor(0, 1, 0, 1)
 
+    local resetPosBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
+    resetPosBtn:SetPoint("TOPLEFT", sqwMiniIcon, "TOPRIGHT", 6, 0)
+    resetPosBtn:SetSize(130, 22)
+    resetPosBtn:SetText("Reset SQW Position")
+    resetPosBtn:SetScript("OnClick", function()
+    ABCReminderDB.sqwPosition = { point = "CENTER", x = 0, y = -150 }
+    sqwFrame:ClearAllPoints()
+    sqwFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -150)end)
+
     local alwaysCb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
     alwaysCb:SetPoint("TOPLEFT", sqwCb, "BOTTOMLEFT", 20, -4); alwaysCb.Text:SetText("Always show (Grayed in combat)")
-    alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW); alwaysCb:SetScript("OnClick", function(cb) ABCReminderDB.alwaysShowSQW = cb:GetChecked() end)
-end)
+    alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW); 
+    alwaysCb:SetScript("OnClick", function(cb) ABCReminderDB.alwaysShowSQW = cb:GetChecked() end)
+
 
      -- Slider de durée pour l'affichage des stats après combat, avec incréments 5 s de 0 à 30
-    local sl = CreateFrame("Slider", "ABCReminderStatsSlider", self, "OptionsSliderTemplate")
-    sl:SetPoint("TOPLEFT", alwaysCb, "BOTTOMLEFT", -20, -30)
-    sl:SetMinMaxValues(0, 30); sl:SetValueStep(5); sl:SetObeyStepOnDrag(true)
-    sl:SetValue(ABCReminderDB.intervalStatsDisplay)
-    sl.Text:SetText("Stats Display Interval (seconds) 0 means permanent")
-    sl.Low:SetText("0"); sl.High:SetText("30")
-    local valTxt = sl:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    valTxt:SetPoint("TOP", sl, "BOTTOM", 0, -2); valTxt:SetText(string.format("%.1f s", ABCReminderDB.intervalStatsDisplay))
-    sl:SetScript("OnValueChanged", function(_, v) ABCReminderDB.intervalStatsDisplay = v; valTxt:SetText(string.format("%.1f s", v)) end)
+    local statsDisplay = CreateFrame("Slider", "ABCReminderStatsSlider", self, "OptionsSliderTemplate")
+    statsDisplay:SetPoint("TOPLEFT", alwaysCb, "BOTTOMLEFT", -20, -30)
+    statsDisplay:SetMinMaxValues(0, 30); statsDisplay:SetValueStep(5); statsDisplay:SetObeyStepOnDrag(true)
+    statsDisplay:SetValue(ABCReminderDB.intervalStatsDisplay)
+    statsDisplay.Text:SetPoint("TOPLEFT", statsDisplay, "TOPRIGHT", 0, -2)
+    statsDisplay.Text:SetText("Stats dDisplay duration 0 means permanent")
+    statsDisplay.Low:SetText("0"); statsDisplay.High:SetText("30")
+    local valTxt = statsDisplay:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    valTxt:SetPoint("TOP", statsDisplay, "BOTTOM", 0, -2); valTxt:SetText(string.format("%.1f s", ABCReminderDB.intervalStatsDisplay))
+    statsDisplay:SetScript("OnValueChanged", function(_, v) ABCReminderDB.intervalStatsDisplay = v; valTxt:SetText(string.format("%.1f s", v)) end)
 
-    local clipCb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
-    clipCb:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", -8, -25); clipCb.Text:SetText("Stop sound when casting resumes")
-    clipCb:SetChecked(ABCReminderDB.clipSound); clipCb:SetScript("OnClick", function(cb) ABCReminderDB.clipSound = cb:GetChecked() end)
-
+end)
 
 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
 Settings.RegisterAddOnCategory(category)
