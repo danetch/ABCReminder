@@ -389,7 +389,7 @@ panel:SetScript("OnShow", function(self)
     sqwMiniIcon:SetVertexColor(0, 1, 0, 1)
 
     local resetPosBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-    resetPosBtn:SetPoint("TOPLEFT", sqwMiniIcon, "TOPRIGHT", 6, 10)
+    resetPosBtn:SetPoint("TOPLEFT", sqwMiniIcon, "TOPRIGHT", 6, -10)
     resetPosBtn:SetSize(130, 22)
     resetPosBtn:SetText("Reset SQW Position")
     resetPosBtn:SetScript("OnClick", function()
