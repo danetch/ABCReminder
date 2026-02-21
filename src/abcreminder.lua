@@ -434,8 +434,6 @@ SlashCmdList.ABCREMINDER = function(msg)
         CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
         print("ABC: Session reset.")
     elseif msg == "stats" then
-    -- todo : add a display only boolean to display session stats without affecting the stored values, to avoid confusion with the "reset session" command   
-    ShowPerformanceTable("Session", CharABCRDB.sessionTrivial.idleTime, CharABCRDB.sessionTrivial.totalTime, false)    
-    
+    ShowPerformanceTable("Session", 0 , 0, false)    
     else Settings.OpenToCategory(panel.name) end
 end
