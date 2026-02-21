@@ -14,8 +14,8 @@ ABCReminderDB = ABCReminderDB or {
     soundFile = "WaterDrop",
     sqwPosition = { point = "CENTER", x = 0, y = -150 },
     statsPosition = { point = "LEFT",   x = 40, y = 0    },
+    bossStatsPosition = { point = "RIGHT", x = -40, y = 0 },
     intervalStatsDisplay = 15,
-
 }
 
 CharABCRDB = CharABCRDB or {
@@ -23,7 +23,6 @@ CharABCRDB = CharABCRDB or {
     statistics = { perInstance = {} },
     sessionTrivial = { totalTime = 0, idleTime = 0 },
 }
-
 
 local isMovingSQW = false
 
@@ -51,53 +50,69 @@ local function GetCurrentActionProgress()
     return nil
 end
 
--- =========================
--- UI: Stats Table
--- =========================
-local statsTable = CreateFrame("Frame", "ABCReminderStatsTable", UIParent, "BackdropTemplate")
-statsTable:SetSize(220, 140)
-statsTable:SetPoint("LEFT", 40, 0)
-statsTable:SetBackdrop({
-    bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 }
-})
-statsTable:SetBackdropColor(0, 0, 0, 0.85)
-statsTable:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
-statsTable:Hide()
-statsTable:SetMovable(true)
-statsTable:EnableMouse(true)
-statsTable:RegisterForDrag("LeftButton")
-statsTable:SetScript("OnDragStart", statsTable.StartMoving)
-statsTable:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    local point, _, _, x, y = self:GetPoint()
-    ABCReminderDB.statsPosition = { point = point, x = x, y = y }
+local function ValidatePosition(pos, default)
+    if not pos or type(pos.x) ~= "number" or type(pos.y) ~= "number" then
+        return default
+    end
+    return pos
+end
+
+-- ==========================================
+-- UI Factory: Create Stats Frame
+-- ==========================================
+local function CreateBaseStatsFrame(name, globalPosKey)
+    local f = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
+    f:SetSize(220, 150)
+    f:SetBackdrop({
+        bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 }
+    })
+    f:SetBackdropColor(0, 0, 0, 0.85)
+    f:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    f:Hide()
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, _, x, y = self:GetPoint()
+        ABCReminderDB[globalPosKey] = { point = point, x = x, y = y }
+    end)
+
+    f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    f.title:SetPoint("TOP", 0, -10)
+
+    f.separator = f:CreateTexture(nil, "ARTWORK")
+    f.separator:SetSize(200, 1)
+    f.separator:SetPoint("TOP", 0, -24)
+    f.separator:SetColorTexture(0.4, 0.4, 0.4, 0.8)
+
+    f.content = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    f.content:SetPoint("TOPLEFT", 12, -32)
+    f.content:SetWidth(196)
+    f.content:SetJustifyH("LEFT")
+
+    return f
+end
+
+local statsTable = CreateBaseStatsFrame("ABCReminderStatsTable", "statsPosition")
+local bossStatsTable = CreateBaseStatsFrame("ABCReminderBossStatsTable", "bossStatsPosition")
+
+statsTable.resetBtn = CreateFrame("Button", nil, statsTable, "UIPanelButtonTemplate")
+statsTable.resetBtn:SetSize(120, 20)
+statsTable.resetBtn:SetPoint("BOTTOM", 0, 12)
+statsTable.resetBtn:SetText("Reset Session")
+statsTable.resetBtn:SetScript("OnClick", function()
+    CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
+    statsTable.content:SetText("|cff00ff00Session Statistics Reset!|r")
 end)
 
--- Titre
-statsTable.title = statsTable:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-statsTable.title:SetPoint("TOP", 0, -10)
-
--- Séparateur
-statsTable.separator = statsTable:CreateTexture(nil, "ARTWORK")
-statsTable.separator:SetSize(200, 1)
-statsTable.separator:SetPoint("TOP", 0, -24)
-statsTable.separator:SetColorTexture(0.4, 0.4, 0.4, 0.8)
-
--- Contenu
-statsTable.content = statsTable:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-statsTable.content:SetPoint("TOPLEFT", 12, -32)
-statsTable.content:SetWidth(196)
-statsTable.content:SetJustifyH("LEFT")
-
--- =========================
--- Logic: ShowPerformanceTable
--- =========================
 local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersist)
-    local ratio   = currentTotal > 0 and (currentIdle / currentTotal) * 100 or 0
-    local bestStr = "|cffaaaaaan/a (trivial)|r"
+    local ratio = currentTotal > 0 and (currentIdle / currentTotal) * 100 or 0
+    local targetFrame = shouldPersist and bossStatsTable or statsTable
     local isNewRecord = false
 
     if shouldPersist then
@@ -105,58 +120,34 @@ local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersi
             CharABCRDB.statistics.perInstance[name] = { totalTime = 0, idleTime = 0, bestRatio = 100 }
         end
         local data = CharABCRDB.statistics.perInstance[name]
-
         if ratio < (data.bestRatio or 100) then
             data.bestRatio = ratio
-            isNewRecord    = true
-            PlaySound(SOUNDKIT.UI_GARRISON_GUEST_GREETING, ABCReminderDB.soundChannel)
+            isNewRecord = true
+            PlaySound(17316, ABCReminderDB.soundChannel)
         end
-
         data.totalTime = data.totalTime + currentTotal
         data.idleTime  = data.idleTime  + currentIdle
-        bestStr = string.format("|cff00ff00%.1f%%|r", data.bestRatio)
-        statsTable.content:SetText(string.format(
-        "Idle this run:  |cffffffff%.1f%%|r\n\nPersonal Best:  %s%s",
-        ratio,
-        bestStr,
-        isNewRecord and "\n\n|cffFFD700New Personal Record!|r" or ""
-    ))
+        
+        targetFrame.content:SetText(string.format("Idle this run: |cffffffff%.1f%%|r\n\nPersonal Best: |cff00ff00%.1f%%|r%s", ratio, data.bestRatio, isNewRecord and "\n\n|cffFFD700★ New Personal Record! ★|r" or ""))
+        targetFrame.title:SetText(isNewRecord and "|cffFFD700" .. name .. "|r" or name)
     else
-        print("DEBUG trivial - currentTotal:", currentTotal, "currentIdle:", currentIdle)
-         -- Contenu trivial : on accumule dans la session persistante
         local st = CharABCRDB.sessionTrivial
-         print("DEBUG st:", st)
         st.totalTime = st.totalTime + currentTotal
         st.idleTime  = st.idleTime  + currentIdle
-
         local sessionRatio = st.totalTime > 0 and (st.idleTime / st.totalTime) * 100 or 0
-        bestStr = string.format("|cffaaaaaa%.1f%% (session)|r", sessionRatio)
-        statsTable.content:SetText(string.format(
-        "Idle this run:  |cffffffff%.1f%%|r\n\nSession avg:  %s",
-        ratio, bestStr
-    ))
+        targetFrame.title:SetText(name)
+        targetFrame.content:SetText(string.format("Idle this run: |cffffffff%.1f%%|r\n\nSession avg: |cffaaaaaa%.1f%%|r", ratio, sessionRatio))
     end
 
-    -- Titre : doré si record, blanc sinon
-    statsTable.title:SetText(isNewRecord
-        and "|cffFFD700★ " .. name .. " ★|r"
-        or  name)
-
-    -- Ajuster la hauteur si record (ligne supplémentaire)
-    statsTable:SetHeight(isNewRecord and 165 or 140)
-
-    statsTable:Show()
+    targetFrame:Show()
     if ABCReminderDB.intervalStatsDisplay and ABCReminderDB.intervalStatsDisplay > 0 then
-        C_Timer.After(ABCReminderDB.intervalStatsDisplay, function() statsTable:Hide() end)
+        C_Timer.After(ABCReminderDB.intervalStatsDisplay, function() targetFrame:Hide() end)
     end
 end
 
-
 -- =========================
--- UI: SQW Circular Visual (Arc / Cooldown sweep)
+-- UI: SQW Circular Visual
 -- =========================
-
--- Frame conteneur
 local sqwFrame = CreateFrame("Frame", "ABCReminderSQW", UIParent)
 sqwFrame:SetSize(50, 50)
 sqwFrame:SetMovable(true)
@@ -169,30 +160,20 @@ sqwFrame:SetScript("OnDragStop", function(self)
     ABCReminderDB.sqwPosition = { point = point, x = x, y = y }
 end)
 
--- Texture de fond (cercle plein, couleur de base)
---sqwFrame.bg = sqwFrame:CreateTexture(nil, "BACKGROUND")
---sqwFrame.bg:SetAllPoints()
---sqwFrame.bg:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
---sqwFrame.bg:SetVertexColor(0.15, 0.15, 0.15, 0.6) -- gris foncé quasi transparent
-
--- Texture overlay colorée (visible en dehors du sweep)
 sqwFrame.fill = sqwFrame:CreateTexture(nil, "BORDER")
 sqwFrame.fill:SetAllPoints()
 sqwFrame.fill:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
-sqwFrame.fill:SetVertexColor(0, 1, 0, 0.85) -- vert
 
--- Frame Cooldown : c'est lui qui fait le "sweep" (masque le fill au fur et à mesure)
 sqwFrame.cd = CreateFrame("Cooldown", nil, sqwFrame, "CooldownFrameTemplate")
 sqwFrame.cd:SetAllPoints()
 sqwFrame.cd:SetDrawEdge(false)
 sqwFrame.cd:SetDrawSwipe(true)
-sqwFrame.cd:SetSwipeColor(0, 0, 0, 1)    -- noir opaque = masque le fill
-sqwFrame.cd:SetReverse(false)             -- false = le sweep part de 360° et se réduit
+sqwFrame.cd:SetSwipeColor(0, 0, 0, 1)
+sqwFrame.cd:SetReverse(false)
 sqwFrame.cd:SetHideCountdownNumbers(true)
 sqwFrame.cd:SetSwipeTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
 sqwFrame.cd:SetDrawBling(false)
 
--- Highlight mode déplacement
 sqwFrame.moveTex = sqwFrame:CreateTexture(nil, "OVERLAY")
 sqwFrame.moveTex:SetAllPoints()
 sqwFrame.moveTex:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
@@ -201,31 +182,20 @@ sqwFrame.moveTex:Hide()
 
 local function UpdateSQWVisual(remaining)
     if not ABCReminderDB.showSQW or isMovingSQW then return end
-
     local threshold = GetSQW()
     local inWindow   = remaining and remaining > 0 and remaining <= threshold
     local showGray   = ABCReminderDB.alwaysShowSQW and remaining and remaining > threshold
 
     if inWindow then
-        -- Arc vert qui se réduit proportionnellement au temps restant
-        local ratio = remaining / threshold          -- 1.0 → 0.0
-        local fakeDuration = threshold              -- durée "totale" fictive
-        local fakeStart = GetTime() - (threshold - remaining)  -- start fictif cohérent
-
         sqwFrame.fill:SetVertexColor(0, 1, 0, 0.85)
         sqwFrame.cd:SetSwipeColor(0, 0, 0, 0.85)
-        sqwFrame.cd:SetCooldown(fakeStart, fakeDuration)
+        sqwFrame.cd:SetCooldown(GetTime() - (threshold - remaining), threshold)
         sqwFrame:Show()
-
     elseif showGray then
-        -- Cercle complet grisé (hors fenêtre SQW mais alwaysShow actif)
         sqwFrame.fill:SetVertexColor(0.3, 0.3, 0.3, 0.4)
-        sqwFrame.cd:SetCooldown(0, 0)   -- pas de sweep = cercle plein
+        sqwFrame.cd:SetCooldown(0, 0)
         sqwFrame:Show()
-
-    else
-        sqwFrame:Hide()
-    end
+    else sqwFrame:Hide() end
 end
 
 -- =========================
@@ -240,7 +210,6 @@ local function ProcessCombatEnd(encounterName)
     local isPersist = (instanceType == "raid" and encounterName ~= nil ) or (diffID == 8)
     local diffName = GetDifficultyInfo(diffID) or tostring(diffID)
     local key = encounterName and ("Boss: " .. encounterName .. " [" .. diffName .. "]") or name    
-    print("DEBUG isPersist:", isPersist, "instanceType:", instanceType, "diffID:", diffID)
     ShowPerformanceTable(key, sessionIdleTime, sessionCombatTime, isPersist)
     sessionCombatTime, sessionIdleTime = 0, 0
 end
@@ -254,14 +223,22 @@ frame:SetScript("OnEvent", function(_, event, ...)
     if event == "PLAYER_ENTERING_WORLD" then
         CharABCRDB.sessionTrivial = CharABCRDB.sessionTrivial or { totalTime = 0, idleTime = 0 }
         ABCReminderDB.intervalStatsDisplay = ABCReminderDB.intervalStatsDisplay or 15
-        local pos = ABCReminderDB.sqwPosition or { point = "CENTER", x = 0, y = -150 }
+        
+        ABCReminderDB.sqwPosition = ValidatePosition(ABCReminderDB.sqwPosition, { point = "CENTER", x = 0, y = -150 })
+        ABCReminderDB.statsPosition = ValidatePosition(ABCReminderDB.statsPosition, { point = "LEFT", x = 40, y = 0 })
+        ABCReminderDB.bossStatsPosition = ValidatePosition(ABCReminderDB.bossStatsPosition, { point = "RIGHT", x = -40, y = 0 })
+
         sqwFrame:ClearAllPoints()
-        sqwFrame:SetPoint(pos.point, UIParent, pos.point, pos.x, pos.y)
-        local spos = ABCReminderDB.statsPosition or { point = "LEFT",   x = 40, y = 0    }
-        if spos then
-            statsTable:ClearAllPoints()
-            statsTable:SetPoint(spos.point, UIParent, spos.point, spos.x, spos.y)
-        end
+        local p = ABCReminderDB.sqwPosition
+        sqwFrame:SetPoint(p.point, UIParent, p.point, p.x, p.y)
+        
+        statsTable:ClearAllPoints()
+        local s = ABCReminderDB.statsPosition
+        statsTable:SetPoint(s.point, UIParent, s.point, s.x, s.y)
+
+        bossStatsTable:ClearAllPoints()
+        local b = ABCReminderDB.bossStatsPosition
+        bossStatsTable:SetPoint(b.point, UIParent, b.point, b.x, b.y)
     elseif event == "PLAYER_REGEN_DISABLED" then inCombat = true
     elseif event == "PLAYER_REGEN_ENABLED" then inCombat = false; ProcessCombatEnd()
     elseif event == "ENCOUNTER_END" then ProcessCombatEnd(select(2, ...)) end
@@ -269,16 +246,11 @@ end)
 
 frame:SetScript("OnUpdate", function(_, delta)
     if not CharABCRDB.enabled then sqwFrame:Hide() return end
-
     if isMovingSQW then
-        sqwFrame:Show()
-        sqwFrame.moveTex:Show()
-        sqwFrame.fill:SetVertexColor(0, 0.5, 1, 0.7)
-        sqwFrame.cd:SetCooldown(0, 0)
+        sqwFrame:Show(); sqwFrame.moveTex:Show()
+        sqwFrame.fill:SetVertexColor(0, 0.5, 1, 0.7); sqwFrame.cd:SetCooldown(0, 0)
     else
-        sqwFrame.moveTex:Hide()
-        --sqwFrame.bg:Hide()   -- le bg de l'ancien code, on le laisse masqué
-        UpdateSQWVisual(GetCurrentActionProgress())
+        sqwFrame.moveTex:Hide(); UpdateSQWVisual(GetCurrentActionProgress())
     end
 
     if inCombat then
@@ -336,7 +308,6 @@ panel:SetScript("OnShow", function(self)
         cb:SetScript("OnClick", function(btn) ABCReminderDB.enabledInstances[inst] = btn:GetChecked() end)
     end
 
-    -- Slider corrigé (1.0 à 10.0)
     local slider = CreateFrame("Slider", "ABCReminderSlider", self, "OptionsSliderTemplate")
     slider:SetPoint("TOPLEFT", 16, y - 30)
     slider:SetMinMaxValues(1.0, 10.0); slider:SetValueStep(0.5); slider:SetObeyStepOnDrag(true)
@@ -353,7 +324,6 @@ panel:SetScript("OnShow", function(self)
 
     local chanDrop = CreateFrame("Frame", "ABCReminderChanDrop", self, "UIDropDownMenuTemplate")
     chanDrop:SetPoint("TOPLEFT", clipCb, "BOTTOMLEFT", -15, -15)
-    UIDropDownMenu_SetWidth(chanDrop, 100); UIDropDownMenu_SetText(chanDrop, ABCReminderDB.soundChannel)
     UIDropDownMenu_Initialize(chanDrop, function(self, level)
         for _, c in ipairs({"Master", "SFX", "Music", "Ambience"}) do
             local info = UIDropDownMenu_CreateInfo()
@@ -362,10 +332,10 @@ panel:SetScript("OnShow", function(self)
             UIDropDownMenu_AddButton(info, level)
         end
     end)
+    UIDropDownMenu_SetWidth(chanDrop, 100); UIDropDownMenu_SetText(chanDrop, ABCReminderDB.soundChannel)
 
     local sndDrop = CreateFrame("Frame", "ABCReminderSndDrop", self, "UIDropDownMenuTemplate")
     sndDrop:SetPoint("TOPLEFT", chanDrop, "BOTTOMLEFT", 0, -10)
-    UIDropDownMenu_SetWidth(sndDrop, 100); UIDropDownMenu_SetText(sndDrop, ABCReminderDB.soundFile)
     UIDropDownMenu_Initialize(sndDrop, function(self, level)
         for name in pairs(soundFiles) do
             local info = UIDropDownMenu_CreateInfo()
@@ -374,6 +344,7 @@ panel:SetScript("OnShow", function(self)
             UIDropDownMenu_AddButton(info, level)
         end
     end)
+    UIDropDownMenu_SetWidth(sndDrop, 100); UIDropDownMenu_SetText(sndDrop, ABCReminderDB.soundFile)
 
     local testBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     testBtn:SetPoint("LEFT", sndDrop, "RIGHT", 10, 2); testBtn:SetSize(80, 22); testBtn:SetText("Test Sound")
@@ -394,17 +365,17 @@ panel:SetScript("OnShow", function(self)
     resetPosBtn:SetSize(130, 22)
     resetPosBtn:SetText("Reset SQW Position")
     resetPosBtn:SetScript("OnClick", function()
-    ABCReminderDB.sqwPosition = { point = "CENTER", x = 0, y = -150 }
-    sqwFrame:ClearAllPoints()
-    sqwFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -150)end)
+        ABCReminderDB.sqwPosition = { point = "CENTER", x = 0, y = -150 }
+        sqwFrame:ClearAllPoints()
+        sqwFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -150)end)
 
     local alwaysCb = CreateFrame("CheckButton", nil, self, "InterfaceOptionsCheckButtonTemplate")
-    alwaysCb:SetPoint("TOPLEFT", sqwCb, "BOTTOMLEFT", 20, -4); alwaysCb.Text:SetText("Always show (Grayed in combat)")
-    alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW); 
+    alwaysCb:SetPoint("TOPLEFT", sqwCb, "BOTTOMLEFT", 20, -4); alwaysCb.Text:SetText("Always show (in combat - Grayed)")
+    alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW);
     alwaysCb:SetScript("OnClick", function(cb) ABCReminderDB.alwaysShowSQW = cb:GetChecked() end)
 
-     -- Slider de durée pour l'affichage des stats après combat, avec incréments 5 s de 0 à 30
-    local statsDisplay = CreateFrame("Slider", "ABCReminderStatsSlider", self, "OptionsSliderTemplate")
+    -- Slider Stats (Nom original : statsDisplay)
+    local statsDisplay = CreateFrame("Slider", "ABCRStatsDur", self, "OptionsSliderTemplate")
     statsDisplay:SetPoint("TOPLEFT", alwaysCb, "BOTTOMLEFT", -20, -30)
     statsDisplay:SetMinMaxValues(0, 30); statsDisplay:SetValueStep(5); statsDisplay:SetObeyStepOnDrag(true)
     statsDisplay:SetValue(ABCReminderDB.intervalStatsDisplay)
@@ -413,16 +384,14 @@ panel:SetScript("OnShow", function(self)
     statsDisplay.Text:SetPoint("TOPLEFT", statsDisplay, "TOPLEFT", 0, 20)
     statsDisplay.Text:SetText("Stats display duration : 0 means permanent")
     statsDisplay.Low:SetText("0"); statsDisplay.High:SetText("30")
-    local valTxt = statsDisplay:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    valTxt:SetPoint("TOP", statsDisplay, "BOTTOM", 0, -2); valTxt:SetText(string.format("%.1f s", ABCReminderDB.intervalStatsDisplay))
-    statsDisplay:SetScript("OnValueChanged", function(_, v) ABCReminderDB.intervalStatsDisplay = v; valTxt:SetText(string.format("%.1f s", v)) end)
-
+    local statsValTxt = statsDisplay:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    statsValTxt:SetPoint("TOP", statsDisplay, "BOTTOM", 0, -2); statsValTxt:SetText(string.format("%.1f s", ABCReminderDB.intervalStatsDisplay))
+    statsDisplay:SetScript("OnValueChanged", function(_, v) ABCReminderDB.intervalStatsDisplay = v; statsValTxt:SetText(string.format("%.1f s", v)) end)
 end)
 
 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
 Settings.RegisterAddOnCategory(category)
 
--- Slash Commands
 SLASH_ABCREMINDER1 = "/ar"
 SlashCmdList.ABCREMINDER = function(msg)
     if msg == "move" then
@@ -434,6 +403,6 @@ SlashCmdList.ABCREMINDER = function(msg)
         CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
         print("ABC: Session reset.")
     elseif msg == "stats" then
-    ShowPerformanceTable("Session", 0 , 0, false)    
+        ShowPerformanceTable("Manual Check", 0, 0, false)
     else Settings.OpenToCategory(panel.name) end
 end
