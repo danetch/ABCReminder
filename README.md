@@ -1,53 +1,109 @@
-ABCReminder
+# ABCReminder
 
-ABCReminder is a World of Warcraft optimization tool designed to help players maximize their uptime (Always Be Casting) and perfect their Spell Queue Window (SQW) management.
-🚀 Key Features
-1. Activity Reminder (Always Be Casting)
+A World of Warcraft addon that helps players optimize their DPS by tracking idle time and providing visual/audio reminders of available casting windows.
 
-    Smart Detection: Monitors in real-time if you are currently casting, channeling, or if the Global Cooldown (GCD) is active.
+## 🎯 Purpose
 
-    Audio Alerts: If you are idle during combat, a sound triggers at regular intervals to remind you to use a capability.
+ABCReminder tracks how much time you spend idle (not casting/channeling) during combat encounters and reminds you to keep casting. It helps eliminate loss of DPS from dead time and ensures you are always casting something.
 
-    Customizable Interval: Adjust the sound frequency from 0.5s to 5.0s via the options menu.
+## ✨ Key Features
 
-    Sound Clipping: Automatically stops the reminder sound as soon as you start a cast, preventing unnecessary noise.
+### 1. Real-Time Idle Detection
+- **Smart detection** of casting, channeling, and ability cooldowns
+- **Continuous monitoring** during combat with minimal performance impact
+- **Automatic combatant tracking** - starts when you enter combat, ends when combat ends
 
-2. Spell Queue Window (SQW) Visual
+### 2. Spell Queue Window (SQW) Visual
+- **Green circle indicator** shows when you're within the spell queue window
+- **Gray circle mode** optionally displays the indicator even outside the SQW during combat (grayed out)
+- **Draggable UI** - reposition the circle anywhere on screen by clicking and dragging
+- **Configurable display** - toggle on/off as needed
 
-    Timing Assistance: A segmented circular UI element indicates exactly when the game engine will accept your next spell input.
+### 3. Audio Reminders
+- **Smart sound alerts** play when you're idle and eligible to cast (based on current encounter type)
+- **Adjustable frequency** - set intervals from 1-10 seconds between sound reminders
+- **Manual clipping** - automatically stops sounds if you resume casting
+- **Multiple sound options**: "WaterDrop" or "SharpPunch" effects
+- **Audio channel selection** - output to Master, SFX, Music, or Ambience channel
 
-    Countdown Logic: The circle appears full at the start of the SQW and loses segments as time runs out.
+### 4. Performance Statistics
+- **Boss encounters** (Raid/Mythic+): Persistent records tracked with:
+  - Current run idle percentage
+  - Personal best (lowest) idle percentage
+  - Total time and idle time counters
+  - Automatic record notifications when you beat your best
+- **Trivial content**: Session-based stats with reset option
+- **Auto-hiding** statistics windows after configurable duration
+- **History browser** - navigate your previous boss encounters with arrow buttons
 
-    Adaptive Segments: Automatically calculates the number of segments based on your system SpellQueueWindow setting (1 segment per 100ms).
+### 5. Flexible Instance Filtering
+- Enable/disable tracking for specific encounter types:
+  - **Party** dungeons
+  - **Raids** (with persistent record-keeping)
+  - **Scenarios**
+  - **Arenas** (disabled by default)
+  - **PvP** (disabled by default)
+  - **Open World** (disabled by default)
 
-    "Always Show" Mode: Optional setting to keep the visual visible as a dim gray circle during the entire GCD/Cast, lighting up in bright green only when the input window opens.
+## 📥 Installation
 
-3. Performance Tracking & Statistics
+1. Download and extract the `ABCReminder` folder
+2. Place it in `World of Warcraft\_retail_\Interface\AddOns\`
+3. Restart World of Warcraft or type `/reload`
+4. Configure in: **Interface → Addons → ABCReminder**
 
-    Persistent Records: Automatically saves your best "Idle Time" ratios for Raid Bosses and Mythic+ completions.
+## 🎮 How It Works
 
-    Record Fanfare: Triggers a special sound and a celebratory chat message when you beat your personal activity record on a boss.
+### During Combat
+1. Addon automatically detects when you enter combat
+2. Tracks idle time and casting/channeling activity in real-time
+3. Plays audio reminders when you're eligible to cast (if enabled for that instance type)
+4. Shows SQW visual to indicate optimal casting windows
+5. On combat end, displays your performance stats
 
-    Session Mode (Trivial Content): For Open World or Normal/Heroic dungeons, stats are tracked for the current session only. This allows you to monitor performance without polluting your high-end records.
+### Statistics Display
+- **Raid/Mythic+ fights**: Persisted to character data; navigate with `<` and `>` buttons; personal best achievements trigger fanfare
+- **Trivial encounters**: Session-only stats; click "Reset Session" button to clear cumulative data
+- Stats automatically hide after duration expires (0 = stays visible)
 
-4. Customization & UI
+## ⚙️ Settings Panel
 
-    Comprehensive Options Panel: Integrated into the standard WoW Interface menu, featuring custom graphics (drops.tga).
+### General
+- **Enable for this character**: Toggle the addon on/off
+- **Instance type checkboxes**: Choose which encounter types to track
 
-    Instance Filtering: Choose exactly where the addon should be active (Raid, Party, Scenarios, or Open World).
+### Audio Settings
+- **Sound Interval** (1-10 seconds): How often reminders trigger while idle
+- **Stop sound when casting resumes**: Auto-clips sounds if you start casting
+- **Sound Channel**: Select output channel (Master, SFX, Music, Ambience)
+- **Sound File**: Choose between sound effects
+- **Test Sound**: Preview the selected audio file
 
-    Audio Management: Select your preferred output channel (Master, SFX, Music, or Ambience) and choose between different sound files.
+### Visual Settings
+- **Show Spell Queue Window visual**: Toggle the circular SQW indicator
+- **Always show (in combat - Grayed)**: Display indicator during combat even when outside SQW window
+- **Reset SQW Position**: Return indicator to center of screen
+- **Stats display duration**: How long statistics remain visible (0 = permanent; 5-30 seconds recommended)
 
-    Movable UI: The SQW visual can be unlocked and repositioned anywhere on your screen.
+## 💾 Data Storage
 
-⌨️ Slash Commands
-Command	Description
-/ar	Opens the ABCReminder configuration panel.
-/ar move	Toggles "Move Mode" for the SQW visual (appears blue when movable).
-/ar reset session	Manually resets the current trivial content session statistics.
-🛠 Installation
+- **ABCReminderDB**: Account-wide configuration (positions, sound settings, intervals)
+- **CharABCRDB**: Character-specific data (enable status, boss records, session stats)
+- All data automatically persists between game sessions
 
-    Download the repository.
+## 🎵 Sound Files
+
+The addon includes two audio options located in the `sound/` folder:
+- `WaterDrop.ogg` - Gentle water drop sound
+- `SharpPunch.ogg` - Sharp punch/hit sound
+
+Victory fanfare uses WoW's built-in "Trumpet" sound (ID: 12123)
+
+## 📊 Performance Impact
+
+- **Minimal overhead**: Uses event-based architecture with efficient updates
+- **OnUpdate checks** every 0.1 seconds during combat only
+- **Optimized calculations** for spell cooldowns and cast tracking
 
     Place the ABCReminder folder into your World of Warcraft/_retail_/Interface/AddOns/ directory.
 
@@ -55,4 +111,4 @@ Command	Description
 
     Restart World of Warcraft.
 
-Current Status: Development in progress. Refining SQW segment transitions and visual feedback.
+Current Status: Development in progress.
