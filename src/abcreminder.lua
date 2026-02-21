@@ -502,7 +502,6 @@ end)
 
 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
 Settings.RegisterAddOnCategory(category)
-
 SLASH_ABCREMINDER1 = "/ar"
 SlashCmdList.ABCREMINDER = function(msg)
     if msg == "move" then
@@ -525,5 +524,12 @@ SlashCmdList.ABCREMINDER = function(msg)
         print("ABC: Session reset.")
     elseif msg == "session" then
         ShowPerformanceTable("Last Session", 0, 0, false)
-    else Settings.OpenToCategory(panel.name) end
+    else
+        if category:GetID() then
+            Settings.OpenToCategory(category:GetID())
+        else
+        -- Au cas où l'ID n'est pas encore prêt, on utilise le nom (méthode de secours)
+            Settings.OpenToCategory(panel.name)
+        end    
+    end
 end
