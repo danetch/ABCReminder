@@ -60,6 +60,23 @@ end
 -- ==========================================
 -- UI Factory: Create Stats Frame
 -- ==========================================
+local historyKeys = {}
+local currentIndex = 0
+
+local function UpdateHistoryKeys()
+    wipe(historyKeys)
+    for name in pairs(CharABCRDB.statistics.perInstance) do
+        table.insert(historyKeys, name)
+    end
+    -- Tri : Raid Bosses d'abord (commencent par "Boss:"), puis le reste (Donjons)
+    table.sort(historyKeys, function(a, b)
+        local aIsBoss = a:find("Boss:") and 1 or 0
+        local bIsBoss = b:find("Boss:") and 1 or 0
+        if aIsBoss ~= bIsBoss then return aIsBoss > bIsBoss end
+        return a < b
+    end)
+end
+
 local function CreateBaseStatsFrame(name, globalPosKey)
     local f = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
     f:SetSize(220, 150)
@@ -87,11 +104,11 @@ local function CreateBaseStatsFrame(name, globalPosKey)
 
     f.separator = f:CreateTexture(nil, "ARTWORK")
     f.separator:SetSize(200, 1)
-    f.separator:SetPoint("TOP", 0, -24)
+    f.separator:SetPoint("TOP", f.title, "BOTTOM", 0, -6)
     f.separator:SetColorTexture(0.4, 0.4, 0.4, 0.8)
 
     f.content = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    f.content:SetPoint("TOPLEFT", 12, -32)
+    f.content:SetPoint("TOPLEFT", f.separator, "BOTTOMLEFT", 4, -10)
     f.content:SetWidth(196)
     f.content:SetJustifyH("LEFT")
 
@@ -101,6 +118,7 @@ end
 local statsTable = CreateBaseStatsFrame("ABCReminderStatsTable", "statsPosition")
 local bossStatsTable = CreateBaseStatsFrame("ABCReminderBossStatsTable", "bossStatsPosition")
 
+-- Bouton Reset Session (sur la table Trivial)
 statsTable.resetBtn = CreateFrame("Button", nil, statsTable, "UIPanelButtonTemplate")
 statsTable.resetBtn:SetSize(120, 20)
 statsTable.resetBtn:SetPoint("BOTTOM", 0, 12)
@@ -110,41 +128,59 @@ statsTable.resetBtn:SetScript("OnClick", function()
     statsTable.content:SetText("|cff00ff00Session Statistics Reset!|r")
 end)
 
-local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersist)
-    local ratio = currentTotal > 0 and (currentIdle / currentTotal) * 100 or 0
-    local targetFrame = shouldPersist and bossStatsTable or statsTable
-    local isNewRecord = false
+-- Ajustements spécifiques pour la fenêtre de Boss
+bossStatsTable:SetSize(280, 160) -- Plus large et un peu plus haute
+bossStatsTable.title:SetWidth(250) -- Permet au titre de prendre presque toute la largeur
+bossStatsTable.title:SetMaxLines(2) -- Autorise le passage à la ligne
+bossStatsTable.separator:SetSize(250, 1) -- Séparateur plus long
+bossStatsTable.content:SetWidth(250)    -- Contenu plus large
+bossStatsTable.title:SetJustifyV("MIDDLE")
 
-    if shouldPersist then
-        if not CharABCRDB.statistics.perInstance[name] then
-            CharABCRDB.statistics.perInstance[name] = { totalTime = 0, idleTime = 0, bestRatio = 100 }
-        end
-        local data = CharABCRDB.statistics.perInstance[name]
-        if ratio < (data.bestRatio or 100) then
-            data.bestRatio = ratio
-            isNewRecord = true
-            PlaySound(17316, ABCReminderDB.soundChannel)
-        end
-        data.totalTime = data.totalTime + currentTotal
-        data.idleTime  = data.idleTime  + currentIdle
-        
-        targetFrame.content:SetText(string.format("Idle this run: |cffffffff%.1f%%|r\n\nPersonal Best: |cff00ff00%.1f%%|r%s", ratio, data.bestRatio, isNewRecord and "\n\n|cffFFD700★ New Personal Record! ★|r" or ""))
-        targetFrame.title:SetText(isNewRecord and "|cffFFD700" .. name .. "|r" or name)
-    else
-        local st = CharABCRDB.sessionTrivial
-        st.totalTime = st.totalTime + currentTotal
-        st.idleTime  = st.idleTime  + currentIdle
-        local sessionRatio = st.totalTime > 0 and (st.idleTime / st.totalTime) * 100 or 0
-        targetFrame.title:SetText(name)
-        targetFrame.content:SetText(string.format("Idle this run: |cffffffff%.1f%%|r\n\nSession avg: |cffaaaaaa%.1f%%|r", ratio, sessionRatio))
-    end
+-- Bouton Fermer (X) pour la fenêtre Boss
+bossStatsTable.closeBtn = CreateFrame("Button", nil, bossStatsTable, "UIPanelCloseButton")
+bossStatsTable.closeBtn:SetPoint("TOPRIGHT", bossStatsTable, "TOPRIGHT", -3, -4)
+bossStatsTable.closeBtn:SetScript("OnClick", function() bossStatsTable:Hide() end)
 
-    targetFrame:Show()
-    if ABCReminderDB.intervalStatsDisplay and ABCReminderDB.intervalStatsDisplay > 0 then
-        C_Timer.After(ABCReminderDB.intervalStatsDisplay, function() targetFrame:Hide() end)
+-- Navigation Historique (ajustée pour la nouvelle largeur)
+local function DisplayHistory(index)
+    if index == 0 or #historyKeys == 0 then
+        bossStatsTable.title:SetText("No History")
+        bossStatsTable.content:SetText("No data saved yet.")
+        return
     end
+    local name = historyKeys[index]
+    local data = CharABCRDB.statistics.perInstance[name]
+    
+    -- Formatage du titre avec couleur et retour à la ligne géré par SetMaxLines
+    bossStatsTable.title:SetText("|cff00ccff" .. name .. "|r")
+    
+    bossStatsTable.content:SetText(string.format(
+        "Personal Best: |cff00ff00%.1f%%|r\n\nTotal Time: %dm %ds\nTotal Idle: %dm %ds",
+        data.bestRatio or 0,
+        math.floor(data.totalTime / 60), data.totalTime % 60,
+        math.floor(data.idleTime / 60), data.idleTime % 60
+    ))
 end
 
+bossStatsTable.prevBtn = CreateFrame("Button", nil, bossStatsTable, "UIPanelButtonTemplate")
+bossStatsTable.prevBtn:SetSize(30, 22); bossStatsTable.prevBtn:SetText("<")
+bossStatsTable.prevBtn:SetPoint("BOTTOMLEFT", 12, 12)
+bossStatsTable.prevBtn:SetScript("OnClick", function()
+    UpdateHistoryKeys()
+    if #historyKeys == 0 then return end
+    currentIndex = (currentIndex <= 1) and #historyKeys or currentIndex - 1
+    DisplayHistory(currentIndex)
+end)
+
+bossStatsTable.nextBtn = CreateFrame("Button", nil, bossStatsTable, "UIPanelButtonTemplate")
+bossStatsTable.nextBtn:SetSize(30, 22); bossStatsTable.nextBtn:SetText(">")
+bossStatsTable.nextBtn:SetPoint("BOTTOMRIGHT", -12, 12)
+bossStatsTable.nextBtn:SetScript("OnClick", function()
+    UpdateHistoryKeys()
+    if #historyKeys == 0 then return end
+    currentIndex = (currentIndex >= #historyKeys) and 1 or currentIndex + 1
+    DisplayHistory(currentIndex)
+end)
 -- =========================
 -- UI: SQW Circular Visual
 -- =========================
@@ -399,10 +435,20 @@ SlashCmdList.ABCREMINDER = function(msg)
         sqwFrame:EnableMouse(isMovingSQW)
         sqwFrame:SetMovable(isMovingSQW)
         print("ABC: Move Mode "..(isMovingSQW and "|cff00ff00ON|r (Drag the blue box)" or "|cffff0000OFF|r"))
+    elseif msg == "stats" or msg == "history" then
+        UpdateHistoryKeys() -- Rafraîchit la liste des boss/donjons
+        if #historyKeys > 0 then
+            if currentIndex == 0 then currentIndex = 1 end -- Initialise l'index si besoin
+            DisplayHistory(currentIndex)
+            ABCReminderBossStatsTable:Show()
+            print("ABC: Showing recorded statistics.")
+        else
+        print("ABC: No records found yet.")
+        end
     elseif msg == "reset session" then
         CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
         print("ABC: Session reset.")
-    elseif msg == "stats" then
-        ShowPerformanceTable("Manual Check", 0, 0, false)
+    elseif msg == "session" then
+        ShowPerformanceTable("Last Session", 0, 0, false)
     else Settings.OpenToCategory(panel.name) end
 end
