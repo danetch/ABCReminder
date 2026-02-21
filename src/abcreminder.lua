@@ -389,7 +389,7 @@ panel:SetScript("OnShow", function(self)
     sqwMiniIcon:SetVertexColor(0, 1, 0, 1)
 
     local resetPosBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-    resetPosBtn:SetPoint("TOPLEFT", sqwMiniIcon, "TOPRIGHT", 6, 0)
+    resetPosBtn:SetPoint("TOPLEFT", sqwMiniIcon, "TOPRIGHT", 6, 10)
     resetPosBtn:SetSize(130, 22)
     resetPosBtn:SetText("Reset SQW Position")
     resetPosBtn:SetScript("OnClick", function()
@@ -402,14 +402,15 @@ panel:SetScript("OnShow", function(self)
     alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW); 
     alwaysCb:SetScript("OnClick", function(cb) ABCReminderDB.alwaysShowSQW = cb:GetChecked() end)
 
-
      -- Slider de durée pour l'affichage des stats après combat, avec incréments 5 s de 0 à 30
     local statsDisplay = CreateFrame("Slider", "ABCReminderStatsSlider", self, "OptionsSliderTemplate")
     statsDisplay:SetPoint("TOPLEFT", alwaysCb, "BOTTOMLEFT", -20, -30)
     statsDisplay:SetMinMaxValues(0, 30); statsDisplay:SetValueStep(5); statsDisplay:SetObeyStepOnDrag(true)
     statsDisplay:SetValue(ABCReminderDB.intervalStatsDisplay)
-    statsDisplay.Text:SetPoint("TOPLEFT", statsDisplay, "TOPRIGHT", 0, -2)
-    statsDisplay.Text:SetText("Stats dDisplay duration 0 means permanent")
+    statsDisplay.Text:SetJustifyH("LEFT")
+    statsDisplay.Text:ClearAllPoints()
+    statsDisplay.Text:SetPoint("TOPLEFT", statsDisplay, "TOPLEFT", 0, 20)
+    statsDisplay.Text:SetText("Stats display duration : 0 means permanent")
     statsDisplay.Low:SetText("0"); statsDisplay.High:SetText("30")
     local valTxt = statsDisplay:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     valTxt:SetPoint("TOP", statsDisplay, "BOTTOM", 0, -2); valTxt:SetText(string.format("%.1f s", ABCReminderDB.intervalStatsDisplay))
