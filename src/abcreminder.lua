@@ -199,6 +199,7 @@ end)
 sqwFrame.fill = sqwFrame:CreateTexture(nil, "BORDER")
 sqwFrame.fill:SetAllPoints()
 sqwFrame.fill:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
+sqwFrame.fill:SetVertexColor(0, 1, 0, 0.85) -- vert par défaut, peut être ajusté dynamiquement
 
 sqwFrame.cd = CreateFrame("Cooldown", nil, sqwFrame, "CooldownFrameTemplate")
 sqwFrame.cd:SetAllPoints()
@@ -217,7 +218,11 @@ sqwFrame.moveTex:SetVertexColor(0, 0.5, 1, 0.5)
 sqwFrame.moveTex:Hide()
 
 local function UpdateSQWVisual(remaining)
-    if not ABCReminderDB.showSQW or isMovingSQW then return end
+    if not ABCReminderDB.showSQW then
+        if not isMovingSQW then sqwFrame:Hide() end
+        return
+    end
+    if isMovingSQW then return end
     local threshold = GetSQW()
     local inWindow   = remaining and remaining > 0 and remaining <= threshold
     local showGray   = ABCReminderDB.alwaysShowSQW and remaining and remaining > threshold
@@ -233,6 +238,76 @@ local function UpdateSQWVisual(remaining)
         sqwFrame:Show()
     else sqwFrame:Hide() end
 end
+-- =========================
+-- Logic: ShowPerformanceTable
+-- =========================
+
+local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersist)
+    local ratio = currentTotal > 0 and (currentIdle / currentTotal) * 100 or 0
+    local targetFrame = shouldPersist and bossStatsTable or statsTable
+    local isNewRecord = false
+
+    if shouldPersist then
+        -- Gestion des Records (Boss / Mythic+)
+        if not CharABCRDB.statistics.perInstance[name] then
+            CharABCRDB.statistics.perInstance[name] = { totalTime = 0, idleTime = 0, bestRatio = 100 }
+        end
+        local data = CharABCRDB.statistics.perInstance[name]
+        
+        if ratio < (data.bestRatio or 100) then
+            data.bestRatio = ratio
+            isNewRecord = true
+            -- Son de victoire (Trompettes)
+            PlaySound(12123, ABCReminderDB.soundChannel)
+        end
+        
+        -- Cumul des données
+        data.totalTime = data.totalTime + currentTotal
+        data.idleTime  = data.idleTime  + currentIdle
+        
+        -- Mise à jour du titre (Support multi-ligne déjà prêt dans la factory)
+        targetFrame.title:SetText(isNewRecord and "|cffFFD700★ " .. name .. " ★|r" or "|cff00ccff" .. name .. "|r")
+        
+        -- Contenu spécifique Boss
+        targetFrame.content:SetText(string.format(
+            "Idle this run: |cffffffff%.1f%%|r\n\nPersonal Best: |cff00ff00%.1f%%|r%s", 
+            ratio, 
+            data.bestRatio, 
+            isNewRecord and "\n\n|cffFFD700★ New Personal Record! ★|r" or ""
+        ))
+        
+        -- On synchronise l'historique pour que les boutons < et > fonctionnent de suite
+        UpdateHistoryKeys()
+        for i, key in ipairs(historyKeys) do
+            if key == name then currentIndex = i break end
+        end
+    else
+        -- Gestion de la Session (Trivial / Slash / Fin de combat non-boss)
+        local st = CharABCRDB.sessionTrivial
+        st.totalTime = st.totalTime + currentTotal
+        st.idleTime  = st.idleTime  + currentIdle
+        local sessionRatio = st.totalTime > 0 and (st.idleTime / st.totalTime) * 100 or 0
+        
+        targetFrame.title:SetText("|cffffd100" .. name .. "|r")
+        targetFrame.content:SetText(string.format(
+            "Idle this run: |cffffffff%.1f%%|r\n\nSession avg: |cffaaaaaa%.1f%%|r", 
+            ratio, 
+            sessionRatio
+        ))
+    end
+
+    targetFrame:Show()
+
+    -- FERMETURE AUTOMATIQUE
+    -- On ne ferme automatiquement que la table de session (statsTable).
+    -- La table de boss reste ouverte pour permettre la navigation et l'usage du bouton "X".
+    if ABCReminderDB.intervalStatsDisplay and ABCReminderDB.intervalStatsDisplay > 0 then
+        C_Timer.After(ABCReminderDB.intervalStatsDisplay, function() 
+            if targetFrame:IsShown() then targetFrame:Hide() end 
+        end)
+    end
+end
+
 
 -- =========================
 -- Engine & Events
