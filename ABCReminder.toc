@@ -4,7 +4,7 @@
 ## Version: 12.0.1
 ## Author: Danetch
 ## SavedVariables: ABCReminderDB
-## CharSavedVariables: CharABCRDB
+## SavedVariablesPerCharacter: CharABCRDB
 ## Category: Combat
 ## Dependencies:
 

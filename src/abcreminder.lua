@@ -122,8 +122,10 @@ local function ShowPerformanceTable(name, currentIdle, currentTotal, shouldPersi
         isNewRecord and "\n\n|cffFFD700New Personal Record!|r" or ""
     ))
     else
+        print("DEBUG trivial - currentTotal:", currentTotal, "currentIdle:", currentIdle)
          -- Contenu trivial : on accumule dans la session persistante
         local st = CharABCRDB.sessionTrivial
+         print("DEBUG st:", st)
         st.totalTime = st.totalTime + currentTotal
         st.idleTime  = st.idleTime  + currentIdle
 
@@ -237,9 +239,8 @@ local function ProcessCombatEnd(encounterName)
     local name, instanceType, diffID = GetInstanceInfo()
     local isPersist = (instanceType == "raid" and encounterName ~= nil ) or (diffID == 8)
     local diffName = GetDifficultyInfo(diffID) or tostring(diffID)
-    local key = encounterName and ("Boss: " .. encounterName .. " [" .. diffName .. "]") or name
-    
-
+    local key = encounterName and ("Boss: " .. encounterName .. " [" .. diffName .. "]") or name    
+    print("DEBUG isPersist:", isPersist, "instanceType:", instanceType, "diffID:", diffID)
     ShowPerformanceTable(key, sessionIdleTime, sessionCombatTime, isPersist)
     sessionCombatTime, sessionIdleTime = 0, 0
 end
@@ -432,5 +433,9 @@ SlashCmdList.ABCREMINDER = function(msg)
     elseif msg == "reset session" then
         CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
         print("ABC: Session reset.")
+    elseif msg == "stats" then
+    -- todo : add a display only boolean to display session stats without affecting the stored values, to avoid confusion with the "reset session" command   
+    ShowPerformanceTable("Session", CharABCRDB.sessionTrivial.idleTime, CharABCRDB.sessionTrivial.totalTime, false)    
+    
     else Settings.OpenToCategory(panel.name) end
 end
