@@ -541,7 +541,7 @@ function ABCReminder_OnAddonCompartmentClick(addonName, button)
     if button == "RightButton" then
         UIDropDownMenu_Initialize(menuCompartment, function(_, level)
         local info = UIDropDownMenu_CreateInfo()
-        info.text, info.func = "Open Options", function() Settings.OpenToCategory(panel.name) end
+        info.text, info.func = "Open Options", function() Settings.OpenToCategory(category:GetID()) end
         UIDropDownMenu_AddButton(info, level)
         info.text, info.func = "Reset Session Stats", function()
             CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
