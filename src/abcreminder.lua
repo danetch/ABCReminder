@@ -533,3 +533,48 @@ SlashCmdList.ABCREMINDER = function(msg)
         end    
     end
 end
+-- =========================
+-- Addon Compartment (Minimap Dropdown)
+-- =========================
+local menuCompartment = CreateFrame("Frame", "ABCReminderCompartmentMenu", UIParent, "UIDropDownMenuTemplate")
+function ABCReminder_OnAddonCompartmentClick(addonName, button)
+    if button == "RightButton" then
+        UIDropDownMenu_Initialize(menuCompartment, function(_, level)
+        local info = UIDropDownMenu_CreateInfo()
+        info.text, info.func = "Open Options", function() Settings.OpenToCategory(panel.name) end
+        UIDropDownMenu_AddButton(info, level)
+        info.text, info.func = "Reset Session Stats", function()
+            CharABCRDB.sessionTrivial = { totalTime = 0, idleTime = 0 }
+            print("ABC: Session statistics reset.")
+        end
+        UIDropDownMenu_AddButton(info, level)
+        info.text, info.func = "show history", function()
+            UpdateHistoryKeys() -- Rafraîchit la liste des boss/donjons
+            if #historyKeys > 0 then
+                if currentIndex == 0 then currentIndex = 1 end -- Initialise l'index si besoin
+                DisplayHistory(currentIndex)
+                ABCReminderBossStatsTable:Show()
+                print("ABC: Showing history.")
+            else
+                print("ABC: No records found yet.")
+            end
+        end
+        UIDropDownMenu_AddButton(info, level)
+        end)
+        ToggleDropDownMenu(1, nil, menuCompartment, "cursor", 0, 0)
+    else
+        Settings.OpenToCategory(category:GetID())
+    end
+end
+
+function ABCReminder_OnAddonCompartmentEnter(addonname,menuItem)
+    GameTooltip:SetOwner(menuItem, "ANCHOR_RIGHT")
+    GameTooltip:SetText("ABCReminder", 1, 1, 1)
+    GameTooltip:AddLine("Left-click to open options.", 0.8, 0.8, 0.8)
+    GameTooltip:AddLine("Right-click for quick actions.", 0.8, 0.8, 0.8)
+    GameTooltip:Show()
+end
+
+function ABCReminder_OnAddonCompartmentLeave()
+    GameTooltip:Hide()
+end

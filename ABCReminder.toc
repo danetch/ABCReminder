@@ -3,6 +3,10 @@
 ## Notes: Reminds you to always be casting your spells
 ## Version: 12.0.1
 ## Author: Danetch
+## IconTexture: Interface\AddOns\ABCReminder\img\drop.tga
+## AddonCompartmentFunc: ABCReminder_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: ABCReminder_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: ABCReminder_OnAddonCompartmentLeave
 ## SavedVariables: ABCReminderDB
 ## SavedVariablesPerCharacter: CharABCRDB
 ## Category: Combat
