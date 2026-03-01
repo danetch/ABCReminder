@@ -513,11 +513,16 @@ end
 -- =========================
 -- Logic: ProcessCombatEnd
 -- =========================
-local function ProcessCombatEnd(encounterName)
+local function ProcessCombatEnd(encounterName,success)
     local instanceName, instanceType, diffID = GetInstanceInfo()
+    
     local diffName = GetDifficultyInfo(diffID) or tostring(diffID)
 
     if mPlusActive and encounterName then
+        if not success then  -- ignorer les wipes
+            sessionCombatTime, sessionIdleTime = 0, 0
+            return
+        end
         local bossRatio = sessionCombatTime > 0 and (sessionIdleTime/sessionCombatTime)*100 or 0
         mPlusCombatTime = mPlusCombatTime + sessionCombatTime
         mPlusIdleTime   = mPlusIdleTime   + sessionIdleTime
@@ -528,6 +533,10 @@ local function ProcessCombatEnd(encounterName)
     end
 
     if instanceType == "raid" and encounterName then
+        if not success then  -- ignorer les wipes
+            sessionCombatTime, sessionIdleTime = 0, 0
+            return
+        end
         if sessionCombatTime < (ABCReminderDB.minRaidBossDuration or 40) then
             sessionCombatTime, sessionIdleTime = 0, 0
             return
@@ -547,6 +556,10 @@ local function ProcessCombatEnd(encounterName)
         data.totalTime = data.totalTime + sessionCombatTime
         data.idleTime  = data.idleTime  + sessionIdleTime
         ShowResultFrame(key, ratio, data.bestRatio, isNewRecord, data.bestDate, true)
+        sessionCombatTime, sessionIdleTime = 0, 0
+        return
+    end
+    if not ABCReminderDB.enabledInstances[instanceType or "none"] then
         sessionCombatTime, sessionIdleTime = 0, 0
         return
     end
