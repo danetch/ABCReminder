@@ -515,7 +515,6 @@ end
 -- =========================
 local function ProcessCombatEnd(encounterName,success)
     local instanceName, instanceType, diffID = GetInstanceInfo()
-    
     local diffName = GetDifficultyInfo(diffID) or tostring(diffID)
 
     if mPlusActive and encounterName then
