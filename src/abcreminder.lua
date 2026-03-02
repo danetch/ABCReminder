@@ -679,7 +679,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
         -- Rafraîchir le panneau si ouvert pour refléter la nouvelle spec active
-        if panel:IsShown() then
+        if panel and panel:IsShown() then
             RefreshPanelDynamic()
         end
 
