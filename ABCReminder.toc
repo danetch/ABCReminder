@@ -1,4 +1,4 @@
-## Interface: 120001, 120000
+## Interface: 120005, 120001, 120000
 ## Title: ABC Reminder
 ## Notes: Reminds you to always be casting your spells
 ## Version: 12.0.1
