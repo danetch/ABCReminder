@@ -124,11 +124,13 @@ local mPlusCombatTime, mPlusIdleTime = 0, 0
 local mPlusBossData = {}
 local currentMPlusName = nil
 
-local function StartMPlusSession(mapName)
+local function StartMPlusSession()
     mPlusActive = true
     mPlusCombatTime, mPlusIdleTime = 0, 0
     mPlusBossData = {}
-    currentMPlusName = mapName
+    local mapID = C_ChallengeMode.GetActiveChallengeMapID()
+    local name = mapID and C_ChallengeMode.GetMapUIInfo(mapID) or "M+ Unknown"
+    currentMPlusName = name
 end
 
 local function EndMPlusSession(completed)
@@ -701,9 +703,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
         ProcessCombatEnd(encounterName, success == 1)
 
     elseif event == "CHALLENGE_MODE_START" then
-        local mapName = C_ChallengeMode.GetActiveChallengeMapID and
-            (C_Map.GetMapInfo(C_ChallengeMode.GetActiveChallengeMapID()) or {}).name or "M+ Unknown"
-        StartMPlusSession(mapName)
+        StartMPlusSession()
 
     elseif event == "CHALLENGE_MODE_COMPLETED" then
         EndMPlusSession(true)
