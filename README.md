@@ -30,7 +30,8 @@ ABCReminder tracks how much time you spend idle (not casting, channeling or on t
 ### 4. Statistics & History
 - **Raid bosses**: per boss and difficulty — kills, wipes, last kill, best, average and the last 10 attempts
 - **Mythic+**: per dungeon — key level, timed / over time / abandoned, boss breakdown and the last 10 runs
-- **Trash & other content**: session stats (last pull + session average), reset when you enter an instance
+- **Raids**: only boss encounters are measured; raid trash is ignored
+- **Trash & other content** (dungeons, scenarios, …): session stats (last pull + session average), reset when you enter an instance
 - **History window** (`/ar history`): Raid and Mythic+ tabs, difficulty filter (works on any client language), hover a row for recent attempts
 - **Minimum raid boss duration** filter to skip trivial old content
 

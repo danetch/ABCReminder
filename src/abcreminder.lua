@@ -768,6 +768,8 @@ local function FlushTrash(label)
     if mplus then AddFight(mplus.fight, f); return end
 
     local instanceName, instanceType = GetInstanceInfo()
+    -- in raids only boss encounters are measured; trash is ignored
+    if instanceType == "raid" then return end
     if not ABCReminderDB.enabledInstances[instanceType or "none"] then return end
 
     lastFight = f
