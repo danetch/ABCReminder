@@ -3,6 +3,7 @@
 -- =========================
 local MAX_ATTEMPTS = 10   -- recent attempts kept per boss / per dungeon
 local GAP_MIN      = 1.0  -- an idle stretch shorter than this (s) is not counted as a "gap"
+local MIN_PULL     = 3.0  -- combats shorter than this (s) are noise (e.g. a stray debuff after a kill)
 local GCD_SPELL    = 61304
 
 local DB_DEFAULTS = {
@@ -763,9 +764,11 @@ local function FlushTrash(label)
     local f = fight
     fight = NewFight()
     CloseGap(f)
-    if f.time <= 0 then return end
-
-    if mplus then AddFight(mplus.fight, f); return end
+    if mplus then
+        if f.time > 0 then AddFight(mplus.fight, f) end
+        return
+    end
+    if f.time < MIN_PULL then return end
 
     local instanceName, instanceType = GetInstanceInfo()
     -- in raids only boss encounters are measured; trash is ignored
@@ -991,6 +994,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
         encounterActive = true
 
     elseif event == "ENCOUNTER_END" then
+        -- ignore an END without a matching START (duplicate END after a kill, or /reload mid-boss)
+        if not encounterActive then return end
         local _, encounterName, difficultyID, _, success = ...
         OnEncounterEnd(encounterName or "Unknown", difficultyID, success == 1)
 
