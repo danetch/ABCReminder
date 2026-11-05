@@ -1,61 +1,77 @@
 -- =========================
--- SavedVariables
+-- Constants & defaults
 -- =========================
-ABCReminderDB = ABCReminderDB or {
+local MAX_ATTEMPTS = 10   -- recent attempts kept per boss / per dungeon
+local GAP_MIN      = 1.0  -- an idle stretch shorter than this (s) is not counted as a "gap"
+local MIN_PULL     = 3.0  -- combats shorter than this (s) are noise (e.g. a stray debuff after a kill)
+local GCD_SPELL    = 61304
+
+local DB_DEFAULTS = {
     clipSound = true,
     soundInterval = 1.0,
-    showSQW = false,
-    alwaysShowSQW = false,
     enabledInstances = {
         party = true, raid = true, scenario = true,
         arena = false, pvp = false, none = false,
     },
     soundChannel = "Master",
     soundFile = "WaterDrop",
-    sqwPosition      = { point = "CENTER", x = 0,   y = -150 },
-    statsPosition    = { point = "LEFT",   x = 40,  y = 0    },
-    bossStatsPosition= { point = "RIGHT",  x = -40, y = 0    },
+    statsPosition     = { point = "LEFT",  x = 40,  y = 0   },
+    bossStatsPosition = { point = "RIGHT", x = -40, y = 0   },
+    historyPosition   = { point = "LEFT",  x = 40,  y = 200 },
     intervalStatsDisplay = 15,
     showSessionResults   = true,
     sessionDisplay       = "chat",
     minRaidBossDuration  = 40,
+    recordWipes          = true,
 }
 
-CharABCRDB = CharABCRDB or {
+local CHAR_DEFAULTS = {
     enabled = true,
     disabledSpecs = {},  -- specID (number) => true si désactivé
     statistics = { perInstance = {}, perBoss = {} },
     sessionTrivial = { totalTime = 0, idleTime = 0, outsideOnly = true },
 }
 
-local isMovingSQW = false
+-- Raid difficulty IDs per filter group (IDs are language-independent)
+local DIFF_OPTIONS = { "All", "LFR", "Normal", "Heroic", "Mythic" }
+local DIFF_GROUPS = {
+    LFR    = { 7, 17 },
+    Normal = { 3, 4, 14 },
+    Heroic = { 5, 6, 15 },
+    Mythic = { 16 },
+}
 
--- =========================
--- Helpers & Logic
--- =========================
 local soundFiles = {
     ["WaterDrop"]  = "Interface\\AddOns\\ABCReminder\\sound\\WaterDrop.ogg",
     ["SharpPunch"] = "Interface\\AddOns\\ABCReminder\\sound\\SharpPunch.ogg",
 }
 
-local function GetSQW()
-    return (tonumber(GetCVar("SpellQueueWindow")) or 400) / 1000
+-- Forward declarations (used before their definition)
+local panel, RefreshPanelDynamic, ShowResultFrame, RefreshHistoryFrame, UpdateSessionFrame
+
+-- =========================
+-- Helpers
+-- =========================
+local function DeepCopy(t)
+    if type(t) ~= "table" then return t end
+    local c = {}
+    for k, v in pairs(t) do c[k] = DeepCopy(v) end
+    return c
 end
 
-local function GetCurrentActionProgress()
-    local name, _, _, startTimeMS, endTimeMS = UnitCastingInfo("player")
-    if not name then name, _, _, startTimeMS, endTimeMS = UnitChannelInfo("player") end
-    if name then return (endTimeMS / 1000) - GetTime() end
-    local cd = C_Spell.GetSpellCooldown(61304)
-    if cd and cd.startTime > 0 and cd.duration > 0 then
-        return (cd.startTime + cd.duration) - GetTime()
+local function ApplyDefaults(defaults, target)
+    for k, v in pairs(defaults) do
+        if target[k] == nil then
+            target[k] = DeepCopy(v)
+        elseif type(v) == "table" and type(target[k]) == "table" then
+            ApplyDefaults(v, target[k])
+        end
     end
-    return nil
 end
 
 local function ValidatePosition(pos, default)
-    if not pos or type(pos.x) ~= "number" or type(pos.y) ~= "number" then
-        return default
+    if type(pos) ~= "table" or type(pos.x) ~= "number" or type(pos.y) ~= "number" then
+        return DeepCopy(default)
     end
     return pos
 end
@@ -64,11 +80,91 @@ local function GetTimestamp()
     return date("%d/%m %H:%M")
 end
 
+local function ActivePct(time, idle)
+    if not time or time <= 0 then return 0 end
+    return (1 - (idle or 0) / time) * 100
+end
+
+local function FormatDuration(sec)
+    sec = math.floor((sec or 0) + 0.5)
+    if sec < 60 then return sec .. "s" end
+    return string.format("%dm%02ds", math.floor(sec / 60), sec % 60)
+end
+
+local function GetRatioColor(activeRatio)
+    if activeRatio >= 98 then return "E6CC80" end
+    if activeRatio >= 95 then return "ff8000" end
+    if activeRatio >= 85 then return "A335EE" end
+    if activeRatio >= 75 then return "0070DD" end
+    if activeRatio >= 60 then return "1EFF00" end
+    if activeRatio >= 50 then return "FFFFFF" end
+    return "9D9D9D"
+end
+
+local function ColorPct(active)
+    return string.format("|cff%s%.1f%%|r", GetRatioColor(active), active)
+end
+
+local function FormatDelta(delta, suffix)
+    if not delta then return "" end
+    local col = delta > 0.05 and "00ff00" or (delta < -0.05 and "ff4040" or "aaaaaa")
+    return string.format(" |cff%s(%+.1f%s)|r", col, delta, suffix or "")
+end
+
+local function IsBusy()
+    if UnitCastingInfo("player") or UnitChannelInfo("player") then return true end
+    local cd = C_Spell.GetSpellCooldown(GCD_SPELL)
+    return (cd and cd.startTime > 0) and true or false
+end
+
+-- =========================
+-- Fight accumulator
+-- =========================
+local function NewFight()
+    return { time = 0, idle = 0, gaps = 0, longestGap = 0, curGap = 0 }
+end
+
+local function CloseGap(f)
+    if f.curGap >= GAP_MIN then
+        f.gaps = f.gaps + 1
+        if f.curGap > f.longestGap then f.longestGap = f.curGap end
+    end
+    f.curGap = 0
+end
+
+local function AddFight(dst, src)
+    dst.time = dst.time + src.time
+    dst.idle = dst.idle + src.idle
+    dst.gaps = dst.gaps + src.gaps
+    if src.longestGap > dst.longestGap then dst.longestGap = src.longestGap end
+end
+
+local function MakeAttempt(f, success)
+    return {
+        date = GetTimestamp(), time = f.time, idle = f.idle,
+        gaps = f.gaps, longestGap = f.longestGap, kill = success and true or false,
+    }
+end
+
+local function PushAttempt(data, att)
+    data.attempts = data.attempts or {}
+    table.insert(data.attempts, att)
+    while #data.attempts > MAX_ATTEMPTS do table.remove(data.attempts, 1) end
+end
+
+local function LastSuccess(data)
+    if not data or not data.attempts then return nil end
+    for i = #data.attempts, 1, -1 do
+        if data.attempts[i].kill then return data.attempts[i] end
+    end
+    return nil
+end
+
 -- =========================
 -- IsEnabled : perso + spec courante
 -- =========================
 local function IsEnabledForCurrentSpec()
-    if not CharABCRDB.enabled then return false end
+    if not CharABCRDB or not CharABCRDB.enabled then return false end
     local specIndex = GetSpecialization()
     if not specIndex then return true end
     local specID = GetSpecializationInfo(specIndex)
@@ -81,23 +177,18 @@ end
 -- =========================
 local abcChatFrame = nil
 
-local function EnsureChatTab()
+local function FindChatTab()
     for i = 1, NUM_CHAT_WINDOWS do
-        local name = GetChatWindowInfo(i)
-        if name == "ABCReminder" then
-            abcChatFrame = _G["ChatFrame" .. i]
-            return
-        end
+        if GetChatWindowInfo(i) == "ABCReminder" then return _G["ChatFrame" .. i] end
     end
+    return nil
+end
+
+local function EnsureChatTab()
+    abcChatFrame = FindChatTab()
     if not abcChatFrame then
         FCF_OpenNewWindow("ABCReminder")
-        for i = 1, NUM_CHAT_WINDOWS do
-            local name = GetChatWindowInfo(i)
-            if name == "ABCReminder" then
-                abcChatFrame = _G["ChatFrame" .. i]
-                break
-            end
-        end
+        abcChatFrame = FindChatTab()
     end
 end
 
@@ -108,65 +199,25 @@ local function ABCPrint(msg)
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffABC|r " .. msg)
     elseif mode == "tab" then
         EnsureChatTab()
-        if abcChatFrame then
-            abcChatFrame:AddMessage("|cff00ccffABC|r " .. msg)
-        else
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffABC|r " .. msg)
-        end
+        local target = abcChatFrame or DEFAULT_CHAT_FRAME
+        target:AddMessage("|cff00ccffABC|r " .. msg)
     end
 end
 
 -- =========================
--- Session M+
+-- Engine state
 -- =========================
-local mPlusActive = false
-local mPlusCombatTime, mPlusIdleTime = 0, 0
-local mPlusBossData = {}
-local currentMPlusName = nil
-
-local function StartMPlusSession()
-    mPlusActive = true
-    mPlusCombatTime, mPlusIdleTime = 0, 0
-    mPlusBossData = {}
-    local mapID = C_ChallengeMode.GetActiveChallengeMapID()
-    local name = mapID and C_ChallengeMode.GetMapUIInfo(mapID) or "M+ Unknown"
-    currentMPlusName = name
-end
-
-local function EndMPlusSession(completed)
-    if not mPlusActive then return end
-    mPlusActive = false
-    if not completed then currentMPlusName = nil; return end
-
-    local name  = currentMPlusName or "M+ Unknown"
-    local ratio = mPlusCombatTime > 0 and (mPlusIdleTime / mPlusCombatTime) * 100 or 0
-
-    if not CharABCRDB.statistics.perInstance[name] then
-        CharABCRDB.statistics.perInstance[name] = { totalTime=0, idleTime=0, bestRatio=100, bestDate=nil, bosses={} }
-    end
-    local data = CharABCRDB.statistics.perInstance[name]
-    local isNewRecord = false
-
-    if ratio < (data.bestRatio or 100) then
-        data.bestRatio = ratio
-        data.bestDate  = GetTimestamp()
-        isNewRecord    = true
-        PlaySound(888, ABCReminderDB.soundChannel)
-    end
-    data.totalTime = data.totalTime + mPlusCombatTime
-    data.idleTime  = data.idleTime  + mPlusIdleTime
-    data.bosses    = mPlusBossData
-
-    ShowResultFrame(name, ratio, data.bestRatio, isNewRecord, data.bestDate, true)
-    currentMPlusName = nil
-end
-
--- =========================
--- Engine vars
--- =========================
-local inCombat, sessionCombatTime, sessionIdleTime = false, 0, 0
+local inCombat        = false
+local encounterActive = false
+local fight           = NewFight()  -- current pull (trash or boss)
+local lastFight       = nil         -- last trivial pull, for the session window
+local mplus           = nil         -- active M+ run: { name, level, fight, bosses, resumed }
 local checkElapsed, soundElapsed, wasEligible, soundHandle = 0, 0, false, nil
-local lastCombatTime, lastCombatIdle = 0, 0
+
+local function StopReminderSound()
+    if soundHandle then StopSound(soundHandle); soundHandle = nil end
+    wasEligible, soundElapsed = false, 0
+end
 
 -- =========================
 -- UI Factory: Base Frame
@@ -193,120 +244,130 @@ local function CreateBaseFrame(name, w, h, posKey)
     return f
 end
 
--- =========================
--- UI: Result Frame
--- =========================
-local resultFrame = CreateBaseFrame("ABCReminderResult", 260, 160, "bossStatsPosition")
-
-resultFrame.title = resultFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-resultFrame.title:SetPoint("TOP", 0, -10)
-resultFrame.title:SetWidth(230); resultFrame.title:SetMaxLines(2)
-
-resultFrame.sep = resultFrame:CreateTexture(nil, "ARTWORK")
-resultFrame.sep:SetSize(230, 1)
-resultFrame.sep:SetPoint("TOP", resultFrame.title, "BOTTOM", 0, -6)
-resultFrame.sep:SetColorTexture(0.4, 0.4, 0.4, 0.8)
-
-resultFrame.content = resultFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-resultFrame.content:SetPoint("TOPLEFT", resultFrame.sep, "BOTTOMLEFT", 8, -10)
-resultFrame.content:SetWidth(226); resultFrame.content:SetJustifyH("LEFT")
-
-resultFrame.closeBtn = CreateFrame("Button", nil, resultFrame, "UIPanelCloseButton")
-resultFrame.closeBtn:SetPoint("TOPRIGHT", -3, -4)
-resultFrame.closeBtn:SetScript("OnClick", function() resultFrame:Hide() end)
-
-function ShowResultFrame(name, ratio, bestRatio, isNewRecord, bestDate, isPersist)
-    local activeRatio     = 100 - ratio
-    local bestActiveRatio = bestRatio and (100 - bestRatio) or nil
-    if isPersist then
-        resultFrame.title:SetText(
-            isNewRecord and ("|cffFFD700★ "..name.." ★|r") or ("|cff00ccff"..name.."|r"))
-        local dateStr = bestDate and (" |cff888888["..bestDate.."]|r") or ""
-        resultFrame.content:SetText(string.format(
-            "Active this run: |cffffffff%.1f%%|r\n\nPersonal Best: |cff00ff00%.1f%%|r%s%s",
-            activeRatio, bestActiveRatio or 0, dateStr,
-            isNewRecord and "\n\n|cffFFD700★ New Personal Record! ★|r" or ""))
-    else
-        local st = CharABCRDB.sessionTrivial
-        local sessionActive = st.totalTime>0 and (1 - st.idleTime/st.totalTime)*100 or 0
-        resultFrame.title:SetText("|cffffd100"..name.."|r")
-        resultFrame.content:SetText(string.format(
-            "Active this run: |cffffffff%.1f%%|r\n\nSession avg: |cffaaaaaa%.1f%%|r",
-            activeRatio, sessionActive))
-    end
-    resultFrame:Show()
-    if ABCReminderDB.intervalStatsDisplay and ABCReminderDB.intervalStatsDisplay > 0 then
-        C_Timer.After(ABCReminderDB.intervalStatsDisplay, function()
-            if resultFrame:IsShown() then resultFrame:Hide() end
+-- Shows a frame and (re)arms its auto-hide timer; a newer display cancels the older timer.
+local function ShowWithAutoHide(f)
+    f:Show()
+    if f.hideTimer then f.hideTimer:Cancel(); f.hideTimer = nil end
+    local delay = ABCReminderDB.intervalStatsDisplay
+    if delay and delay > 0 then
+        f.hideTimer = C_Timer.NewTimer(delay, function()
+            f.hideTimer = nil
+            f:Hide()
         end)
     end
 end
 
 -- =========================
+-- UI: Result Frame (card)
+-- =========================
+local resultFrame = CreateBaseFrame("ABCReminderResult", 270, 160, "bossStatsPosition")
+
+resultFrame.title = resultFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+resultFrame.title:SetPoint("TOP", 0, -10)
+resultFrame.title:SetWidth(220); resultFrame.title:SetMaxLines(2)
+
+resultFrame.sep = resultFrame:CreateTexture(nil, "ARTWORK")
+resultFrame.sep:SetSize(240, 1)
+resultFrame.sep:SetPoint("TOP", resultFrame.title, "BOTTOM", 0, -6)
+resultFrame.sep:SetColorTexture(0.4, 0.4, 0.4, 0.8)
+
+resultFrame.content = resultFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+resultFrame.content:SetPoint("TOPLEFT", resultFrame.sep, "BOTTOMLEFT", 4, -8)
+resultFrame.content:SetWidth(236); resultFrame.content:SetJustifyH("LEFT")
+resultFrame.content:SetSpacing(2)
+
+resultFrame.closeBtn = CreateFrame("Button", nil, resultFrame, "UIPanelCloseButton")
+resultFrame.closeBtn:SetPoint("TOPRIGHT", -3, -4)
+resultFrame.closeBtn:SetScript("OnClick", function() resultFrame:Hide() end)
+
+-- Common "how did this pull go" lines
+local function FightLines(f, prev)
+    local active = ActivePct(f.time, f.idle)
+    local lines = {}
+    local delta = prev and (active - ActivePct(prev.time, prev.idle)) or nil
+    lines[#lines+1] = "Active: " .. ColorPct(active) .. FormatDelta(delta, " vs last")
+    lines[#lines+1] = string.format("Combat: |cffffffff%s|r   Idle: |cffffffff%.1fs|r",
+        FormatDuration(f.time), f.idle)
+    if f.gaps > 0 then
+        lines[#lines+1] = string.format("Idle gaps (>%ds): |cffffffff%d|r   longest |cffffffff%.1fs|r",
+            GAP_MIN, f.gaps, f.longestGap)
+    else
+        lines[#lines+1] = string.format("Idle gaps (>%ds): |cff00ff00none|r", GAP_MIN)
+    end
+    return lines
+end
+
+-- card = { title, lines }
+ShowResultFrame = function(title, lines)
+    resultFrame.title:SetText(title)
+    resultFrame.content:SetText(table.concat(lines, "\n"))
+    local h = 10 + resultFrame.title:GetStringHeight() + 7 + 8 + resultFrame.content:GetStringHeight() + 14
+    resultFrame:SetHeight(math.max(h, 80))
+    ShowWithAutoHide(resultFrame)
+end
+
+-- =========================
 -- UI: Session Frame
 -- =========================
-local statsTable = CreateBaseFrame("ABCReminderStatsTable", 210, 120, "statsPosition")
+local statsTable = CreateBaseFrame("ABCReminderStatsTable", 230, 120, "statsPosition")
 
 statsTable.title = statsTable:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 statsTable.title:SetPoint("TOP", 0, -10); statsTable.title:SetText("|cffffd100Session|r")
 
 statsTable.sep = statsTable:CreateTexture(nil, "ARTWORK")
-statsTable.sep:SetSize(190, 1)
+statsTable.sep:SetSize(210, 1)
 statsTable.sep:SetPoint("TOP", statsTable.title, "BOTTOM", 0, -5)
 statsTable.sep:SetColorTexture(0.4, 0.4, 0.4, 0.8)
 
 statsTable.content = statsTable:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-statsTable.content:SetPoint("TOPLEFT", statsTable.sep, "BOTTOMLEFT", 8, -8)
-statsTable.content:SetWidth(186); statsTable.content:SetJustifyH("LEFT")
+statsTable.content:SetPoint("TOPLEFT", statsTable.sep, "BOTTOMLEFT", 4, -8)
+statsTable.content:SetWidth(206); statsTable.content:SetJustifyH("LEFT")
+statsTable.content:SetSpacing(2)
+
+local function ResetSession()
+    CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=true }
+    lastFight = nil
+end
 
 statsTable.resetBtn = CreateFrame("Button", nil, statsTable, "UIPanelButtonTemplate")
 statsTable.resetBtn:SetSize(110, 18); statsTable.resetBtn:SetPoint("BOTTOM", 0, 8)
 statsTable.resetBtn:SetText("Reset Session")
 statsTable.resetBtn:SetScript("OnClick", function()
-    CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=true }
-    lastCombatTime, lastCombatIdle = 0, 0
+    ResetSession()
     statsTable.content:SetText("|cff00ff00Reset!|r")
 end)
 
-local function UpdateSessionFrame()
-    local st         = CharABCRDB.sessionTrivial
-    local sessActive = st.totalTime > 0    and (1 - st.idleTime / st.totalTime)     * 100 or 0
-    local lastActive = lastCombatTime > 0  and (1 - lastCombatIdle / lastCombatTime) * 100 or 0
+UpdateSessionFrame = function()
+    local st = CharABCRDB.sessionTrivial
+    local sessActive = ActivePct(st.totalTime, st.idleTime)
+    local lf = lastFight
 
-    statsTable.content:SetText(string.format(
-        "Last:    |cffffffff%.1f%%|r  %dm%ds / %dm%ds\nSession: |cffaaaaaa%.1f%%|r  %dm%ds / %dm%ds",
-        lastActive,
-        math.floor(lastCombatIdle/60), lastCombatIdle%60,
-        math.floor(lastCombatTime/60), lastCombatTime%60,
-        sessActive,
-        math.floor(st.idleTime/60),    st.idleTime%60,
-        math.floor(st.totalTime/60),   st.totalTime%60
-    ))
+    local lines = {}
+    if lf then
+        lines[#lines+1] = string.format("Last:     %s  idle %.1fs / %s",
+            ColorPct(ActivePct(lf.time, lf.idle)), lf.idle, FormatDuration(lf.time))
+    else
+        lines[#lines+1] = "Last:     |cff888888-|r"
+    end
+    lines[#lines+1] = string.format("Session: %s  idle %s / %s",
+        ColorPct(sessActive), FormatDuration(st.idleTime), FormatDuration(st.totalTime))
+    statsTable.content:SetText(table.concat(lines, "\n"))
 
     if not ABCReminderDB.showSessionResults then return end
-    local mode = ABCReminderDB.sessionDisplay
-    if mode == "window" then
-        statsTable:Show()
-        if ABCReminderDB.intervalStatsDisplay and ABCReminderDB.intervalStatsDisplay > 0 then
-            C_Timer.After(ABCReminderDB.intervalStatsDisplay, function()
-                if statsTable:IsShown() then statsTable:Hide() end
-            end)
-        end
+    if ABCReminderDB.sessionDisplay == "window" then
+        ShowWithAutoHide(statsTable)
     else
-        ABCPrint(string.format(
-            "Session: %.1f%% active  %dm%ds / %dm%ds | Last: %.1f%%",
-            sessActive,
-            math.floor(st.idleTime/60), st.idleTime%60,
-            math.floor(st.totalTime/60), st.totalTime%60,
-            lastActive
-        ))
+        local lastStr = lf and string.format(" | Last: %.1f%% (%s, %d gaps)",
+            ActivePct(lf.time, lf.idle), FormatDuration(lf.time), lf.gaps) or ""
+        ABCPrint(string.format("Session: %.1f%% active over %s%s",
+            sessActive, FormatDuration(st.totalTime), lastStr))
     end
 end
 
 -- =========================
 -- UI: History Frame
 -- =========================
-local HISTORY_W, HISTORY_H = 370, 320
+local HISTORY_W, HISTORY_H = 470, 340
 local historyFrame = CreateBaseFrame("ABCReminderHistory", HISTORY_W, HISTORY_H, "historyPosition")
 
 historyFrame.closeBtn = CreateFrame("Button", nil, historyFrame, "UIPanelCloseButton")
@@ -330,7 +391,6 @@ local diffFilterDrop = CreateFrame("Frame", "ABCReminderDiffDrop", historyFrame,
 diffFilterDrop:SetPoint("LEFT", historyFrame.tabMythic, "RIGHT", 2, 0)
 historyFrame.currentDiffFilter = "All"
 
-local DIFF_OPTIONS = { "All", "Normal", "Heroic", "Mythic", "LFR" }
 UIDropDownMenu_Initialize(diffFilterDrop, function(_, level)
     for _, d in ipairs(DIFF_OPTIONS) do
         local info = UIDropDownMenu_CreateInfo()
@@ -352,9 +412,24 @@ historyFrame.sep:SetPoint("TOPRIGHT", historyFrame,         "TOPRIGHT",    -12, 
 historyFrame.sep:SetColorTexture(0.4, 0.4, 0.4, 0.8)
 
 local SCROLL_W    = HISTORY_W - 34
-local COL_NAME_W  = SCROLL_W - 118
-local COL_RATIO_W = 54
-local COL_DATE_W  = 56
+local COL_DATE_W  = 70
+local COL_BEST_W  = 86
+local COL_LAST_W  = 62
+local COL_COUNT_W = 40
+local COL_NAME_W  = SCROLL_W - (COL_DATE_W + COL_BEST_W + COL_LAST_W + COL_COUNT_W) - 22
+
+-- x offsets (from the right edge) of each right-aligned column
+local OFF_DATE  = -2
+local OFF_BEST  = OFF_DATE  - (COL_DATE_W + 4)
+local OFF_LAST  = OFF_BEST  - (COL_BEST_W + 4)
+local OFF_COUNT = OFF_LAST  - (COL_LAST_W + 4)
+
+local function MakeColumn(parent, font, width, rightOffset)
+    local fs = parent:CreateFontString(nil, "OVERLAY", font)
+    fs:SetPoint("RIGHT", parent, "RIGHT", rightOffset, 0)
+    fs:SetWidth(width); fs:SetJustifyH("RIGHT"); fs:SetWordWrap(false)
+    return fs
+end
 
 local colHeaderFrame = CreateFrame("Frame", nil, historyFrame)
 colHeaderFrame:SetSize(SCROLL_W, 18)
@@ -365,15 +440,11 @@ colHeaderBg:SetAllPoints(); colHeaderBg:SetColorTexture(0.18, 0.18, 0.18, 0.8)
 
 local colHdrName = colHeaderFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 colHdrName:SetPoint("LEFT", colHeaderFrame, "LEFT", 6, 0)
-colHdrName:SetWidth(COL_NAME_W); colHdrName:SetJustifyH("LEFT"); colHdrName:SetText("|cffaaaaaaName|r")
-
-local colHdrRatio = colHeaderFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-colHdrRatio:SetPoint("RIGHT", colHeaderFrame, "RIGHT", -(COL_DATE_W + 4), 0)
-colHdrRatio:SetWidth(COL_RATIO_W); colHdrRatio:SetJustifyH("RIGHT"); colHdrRatio:SetText("|cffaaaaaaBest|r")
-
-local colHdrDate = colHeaderFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-colHdrDate:SetPoint("RIGHT", colHeaderFrame, "RIGHT", -2, 0)
-colHdrDate:SetWidth(COL_DATE_W); colHdrDate:SetJustifyH("RIGHT"); colHdrDate:SetText("|cffaaaaaaDate|r")
+colHdrName:SetWidth(COL_NAME_W); colHdrName:SetJustifyH("LEFT")
+local colHdrCount = MakeColumn(colHeaderFrame, "GameFontNormalSmall", COL_COUNT_W, OFF_COUNT)
+local colHdrLast  = MakeColumn(colHeaderFrame, "GameFontNormalSmall", COL_LAST_W,  OFF_LAST)
+local colHdrBest  = MakeColumn(colHeaderFrame, "GameFontNormalSmall", COL_BEST_W,  OFF_BEST)
+local colHdrDate  = MakeColumn(colHeaderFrame, "GameFontNormalSmall", COL_DATE_W,  OFF_DATE)
 
 local scrollFrame = CreateFrame("ScrollFrame", nil, historyFrame, "UIPanelScrollFrameTemplate")
 scrollFrame:SetPoint("TOPLEFT",     colHeaderFrame, "BOTTOMLEFT",  0,   -2)
@@ -385,98 +456,130 @@ scrollFrame:SetScrollChild(scrollChild)
 
 historyFrame.currentFilter = "raid"
 
-local function GetRatioColor(activeRatio)
-    if activeRatio >= 98 then return "E6CC80" end
-    if activeRatio >= 95 then return "ff8000" end
-    if activeRatio >= 85 then return "A335EE" end
-    if activeRatio >= 75 then return "0070DD" end
-    if activeRatio >= 60 then return "1EFF00" end
-    if activeRatio >= 50 then return "FFFFFF" end
-    return "9D9D9D"
+local function AttemptTooltipLine(a, isMPlus)
+    local active = ActivePct(a.time, a.idle)
+    local status
+    if isMPlus then
+        if not a.kill then status = "|cffff4040abandoned|r"
+        elseif a.onTime == true then status = "|cff00ff00timed|r"
+        elseif a.onTime == false then status = "|cffff9900over time|r"
+        else status = "|cff00ff00done|r" end
+        local lvl = a.level and ("+" .. a.level .. " ") or ""
+        return string.format("%s  %s%s  %s  %s", a.date or "?", lvl, FormatDuration(a.time),
+            ColorPct(active), status)
+    end
+    status = a.kill and "|cff00ff00kill|r" or "|cffff4040wipe|r"
+    return string.format("%s  %s  %s  %s", a.date or "?", FormatDuration(a.time), ColorPct(active), status)
 end
 
 local rowPool = {}
-local NUM_ROWS = 60
 
-for i = 1, NUM_ROWS do
+local function GetRow(i)
+    if rowPool[i] then return rowPool[i] end
     local row = CreateFrame("Frame", nil, scrollChild)
     row:SetSize(SCROLL_W, 22)
     row:SetPoint("TOPLEFT", 0, -(i-1)*22)
 
     row.bg = row:CreateTexture(nil, "BACKGROUND")
     row.bg:SetAllPoints()
-    row.bg:SetColorTexture(i%2==0 and 0.06 or 0.12, i%2==0 and 0.06 or 0.12, i%2==0 and 0.06 or 0.12, 0.5)
+    local shade = (i % 2 == 0) and 0.06 or 0.12
+    row.bg:SetColorTexture(shade, shade, shade, 0.5)
 
     row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.nameText:SetPoint("LEFT", row, "LEFT", 6, 0)
     row.nameText:SetWidth(COL_NAME_W); row.nameText:SetJustifyH("LEFT"); row.nameText:SetWordWrap(false)
-
-    row.ratioText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.ratioText:SetPoint("RIGHT", row, "RIGHT", -(COL_DATE_W + 4), 0)
-    row.ratioText:SetWidth(COL_RATIO_W); row.ratioText:SetJustifyH("RIGHT")
-
-    row.dateText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    row.dateText:SetPoint("RIGHT", row, "RIGHT", -2, 0)
-    row.dateText:SetWidth(COL_DATE_W); row.dateText:SetJustifyH("RIGHT")
+    row.countText = MakeColumn(row, "GameFontHighlightSmall", COL_COUNT_W, OFF_COUNT)
+    row.lastText  = MakeColumn(row, "GameFontHighlightSmall", COL_LAST_W,  OFF_LAST)
+    row.bestText  = MakeColumn(row, "GameFontHighlightSmall", COL_BEST_W,  OFF_BEST)
+    row.dateText  = MakeColumn(row, "GameFontHighlightSmall", COL_DATE_W,  OFF_DATE)
 
     row:EnableMouse(true)
     row:SetScript("OnEnter", function(self)
-        if not self.data then return end
-        local d = self.data
+        local e = self.entry
+        if not e then return end
+        local d, isMPlus = e.data, e.isMPlus
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText(d.name, 1, 1, 1)
-        GameTooltip:AddLine(string.format("Total:  %dm %ds", math.floor(d.totalTime/60), d.totalTime%60), 0.8, 0.8, 0.8)
-        GameTooltip:AddLine(string.format("Idle:   %dm %ds", math.floor(d.idleTime/60),  d.idleTime%60),  0.8, 0.8, 0.8)
-        local bestActive = 100 - (d.bestRatio or 0)
-        GameTooltip:AddLine(string.format("Best:   %.1f%% active", bestActive), 0, 1, 0)
-        if d.bestDate then GameTooltip:AddLine("Record: "..d.bestDate, 0.6, 0.6, 0.6) end
-        if d.bosses and #d.bosses > 0 then
+        GameTooltip:SetText(e.name, 1, 1, 1)
+        if d.bestRatio and d.bestDate then
+            local lvl = (isMPlus and d.bestLevel) and (" at +" .. d.bestLevel) or ""
+            GameTooltip:AddLine(string.format("Best: %.1f%% active%s  (%s)", 100 - d.bestRatio, lvl, d.bestDate), 0, 1, 0)
+        end
+        if (d.totalTime or 0) > 0 then
+            GameTooltip:AddLine(string.format("Average: %.1f%% active over %s",
+                ActivePct(d.totalTime, d.idleTime), FormatDuration(d.totalTime)), 0.8, 0.8, 0.8)
+        end
+        if d.attempts and #d.attempts > 0 then
             GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("Bosses (info):", 1, 0.8, 0)
-            for _, b in ipairs(d.bosses) do
+            GameTooltip:AddLine("Recent attempts:", 1, 0.8, 0)
+            for i = #d.attempts, 1, -1 do
+                GameTooltip:AddLine("  " .. AttemptTooltipLine(d.attempts[i], isMPlus), 0.8, 0.8, 0.8)
+            end
+        end
+        local last = isMPlus and LastSuccess(d)
+        local bosses = (last and last.bosses) or d.bosses
+        if isMPlus and bosses and #bosses > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Bosses (last completed run):", 1, 0.8, 0)
+            for _, b in ipairs(bosses) do
                 GameTooltip:AddLine(string.format("  %s: %.1f%% active", b.name, 100 - b.ratio), 0.8, 0.8, 0.8)
             end
         end
         GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    rowPool[i] = row; row:Hide()
+    rowPool[i] = row
+    return row
 end
 
-local function MatchesDiffFilter(name, diff)
+local function MatchesDiffFilter(name, data, diff)
     if diff == "All" then return true end
-    return name:find("%["..diff.."%]") ~= nil
+    local group = DIFF_GROUPS[diff]
+    if not group then return true end
+    if data.difficultyID then
+        for _, id in ipairs(group) do
+            if id == data.difficultyID then return true end
+        end
+        return false
+    end
+    -- Older records only have the (localized) difficulty name in their key
+    for _, id in ipairs(group) do
+        local dName = GetDifficultyInfo(id)
+        if dName and name:find("[" .. dName .. "]", 1, true) then return true end
+    end
+    return false
 end
 
 local function GetHistoryEntries(filter, diffFilter)
     local entries = {}
     if filter == "raid" then
         for name, data in pairs(CharABCRDB.statistics.perBoss) do
-            if MatchesDiffFilter(name, diffFilter) then
-                table.insert(entries, { name=name, totalTime=data.totalTime, idleTime=data.idleTime,
-                    bestRatio=data.bestRatio, bestDate=data.bestDate })
+            if MatchesDiffFilter(name, data, diffFilter) then
+                entries[#entries+1] = { name = name:gsub("^Boss: ", ""), data = data, isMPlus = false }
             end
         end
     else
         for name, data in pairs(CharABCRDB.statistics.perInstance) do
-            table.insert(entries, { name=name, totalTime=data.totalTime, idleTime=data.idleTime,
-                bestRatio=data.bestRatio, bestDate=data.bestDate, bosses=data.bosses })
+            entries[#entries+1] = { name = name, data = data, isMPlus = true }
         end
     end
-    table.sort(entries, function(a,b) return (a.bestRatio or 100) < (b.bestRatio or 100) end)
+    table.sort(entries, function(a, b)
+        local ra, rb = a.data.bestRatio or 100, b.data.bestRatio or 100
+        if ra ~= rb then return ra < rb end
+        return a.name < b.name
+    end)
     return entries
 end
 
-function RefreshHistoryFrame()
+RefreshHistoryFrame = function()
     local entries  = GetHistoryEntries(historyFrame.currentFilter, historyFrame.currentDiffFilter)
     local isRaid   = historyFrame.currentFilter == "raid"
-    local activeC  = {1, 0.8, 0}
-    local inactC   = {0.8, 0.8, 0.8}
 
-    historyFrame.tabRaid:GetFontString():SetTextColor(
-        isRaid and activeC[1] or inactC[1], isRaid and activeC[2] or inactC[2], isRaid and activeC[3] or inactC[3])
-    historyFrame.tabMythic:GetFontString():SetTextColor(
-        (not isRaid) and activeC[1] or inactC[1], (not isRaid) and activeC[2] or inactC[2], (not isRaid) and activeC[3] or inactC[3])
+    local function TabColor(btn, active)
+        if active then btn:GetFontString():SetTextColor(1, 0.8, 0)
+        else btn:GetFontString():SetTextColor(0.8, 0.8, 0.8) end
+    end
+    TabColor(historyFrame.tabRaid, isRaid)
+    TabColor(historyFrame.tabMythic, not isRaid)
 
     if isRaid then
         diffFilterDrop:Show()
@@ -486,19 +589,34 @@ function RefreshHistoryFrame()
         UIDropDownMenu_SetText(diffFilterDrop, "All")
     end
 
-    for i = 1, NUM_ROWS do
-        local row, entry = rowPool[i], entries[i]
-        if entry then
-            row.data = entry
-            row.nameText:SetText(entry.name)
-            local activeRatio = 100 - (entry.bestRatio or 0)
-            local col = GetRatioColor(activeRatio)
-            row.ratioText:SetText(string.format("|cff%s%.1f%%|r", col, activeRatio))
-            row.dateText:SetText(entry.bestDate and ("|cff888888"..entry.bestDate.."|r") or "")
-            row:Show()
+    colHdrName:SetText(isRaid and "|cffaaaaaaBoss|r" or "|cffaaaaaaDungeon|r")
+    colHdrCount:SetText(isRaid and "|cffaaaaaaKills|r" or "|cffaaaaaaRuns|r")
+    colHdrLast:SetText("|cffaaaaaaLast|r")
+    colHdrBest:SetText("|cffaaaaaaBest|r")
+    colHdrDate:SetText("|cffaaaaaaBest on|r")
+
+    for i, entry in ipairs(entries) do
+        local row, d = GetRow(i), entry.data
+        row.entry = entry
+        row.nameText:SetText(entry.name)
+        local count = isRaid and d.kills or d.runs
+        row.countText:SetText(count and tostring(count) or "|cff888888-|r")
+
+        local last = LastSuccess(d)
+        row.lastText:SetText(last and ColorPct(ActivePct(last.time, last.idle)) or "|cff888888-|r")
+
+        if d.bestRatio and d.bestDate then
+            local best = ColorPct(100 - d.bestRatio)
+            if not isRaid and d.bestLevel then best = best .. " |cffaaaaaa+" .. d.bestLevel .. "|r" end
+            row.bestText:SetText(best)
         else
-            row.data = nil; row:Hide()
+            row.bestText:SetText("|cff888888-|r")
         end
+        row.dateText:SetText(d.bestDate and ("|cff888888" .. d.bestDate .. "|r") or "")
+        row:Show()
+    end
+    for i = #entries + 1, #rowPool do
+        rowPool[i].entry = nil; rowPool[i]:Hide()
     end
     scrollChild:SetHeight(math.max(#entries, 1) * 22)
 end
@@ -513,247 +631,389 @@ local function ShowHistoryFrame(filter)
 end
 
 -- =========================
--- Logic: ProcessCombatEnd
+-- Records helpers
 -- =========================
-local function ProcessCombatEnd(encounterName,success)
-    local instanceName, instanceType, diffID = GetInstanceInfo()
-    local diffName = GetDifficultyInfo(diffID) or tostring(diffID)
-
-    if mPlusActive and encounterName then
-        if not success then  -- ignorer les wipes
-            sessionCombatTime, sessionIdleTime = 0, 0
-            return
-        end
-        local bossRatio = sessionCombatTime > 0 and (sessionIdleTime/sessionCombatTime)*100 or 0
-        mPlusCombatTime = mPlusCombatTime + sessionCombatTime
-        mPlusIdleTime   = mPlusIdleTime   + sessionIdleTime
-        table.insert(mPlusBossData, { name=encounterName, ratio=bossRatio })
-        ShowResultFrame(encounterName.." (M+)", bossRatio, bossRatio, false, nil, false)
-        sessionCombatTime, sessionIdleTime = 0, 0
-        return
+-- Updates best on a successful attempt; returns isRecord, isFirst, improvement (active % points)
+local function UpdateBest(data, f, level)
+    local ratio = (f.time > 0) and (f.idle / f.time) * 100 or 0
+    if not data.bestDate then
+        data.bestRatio, data.bestDate, data.bestLevel = ratio, GetTimestamp(), level
+        return false, true, nil
     end
-
-    if instanceType == "raid" and encounterName then
-        if not success then  -- ignorer les wipes
-            sessionCombatTime, sessionIdleTime = 0, 0
-            return
-        end
-        if sessionCombatTime < (ABCReminderDB.minRaidBossDuration or 40) then
-            sessionCombatTime, sessionIdleTime = 0, 0
-            return
-        end
-        local ratio = sessionCombatTime > 0 and (sessionIdleTime/sessionCombatTime)*100 or 0
-        local key   = "Boss: "..encounterName.." ["..diffName.."]"
-
-        if not CharABCRDB.statistics.perBoss[key] then
-            CharABCRDB.statistics.perBoss[key] = { totalTime=0, idleTime=0, bestRatio=100, bestDate=nil }
-        end
-        local data = CharABCRDB.statistics.perBoss[key]
-        local isNewRecord = false
-        if ratio < (data.bestRatio or 100) then
-            data.bestRatio = ratio; data.bestDate = GetTimestamp(); isNewRecord = true
-            PlaySound(888, ABCReminderDB.soundChannel)
-        end
-        data.totalTime = data.totalTime + sessionCombatTime
-        data.idleTime  = data.idleTime  + sessionIdleTime
-        ShowResultFrame(key, ratio, data.bestRatio, isNewRecord, data.bestDate, true)
-        sessionCombatTime, sessionIdleTime = 0, 0
-        return
+    if ratio < (data.bestRatio or 100) then
+        local gain = (data.bestRatio or 100) - ratio
+        data.bestRatio, data.bestDate, data.bestLevel = ratio, GetTimestamp(), level
+        PlaySound(888, ABCReminderDB.soundChannel)
+        return true, false, gain
     end
-    if not ABCReminderDB.enabledInstances[instanceType or "none"] then
-        sessionCombatTime, sessionIdleTime = 0, 0
-        return
+    return false, false, nil
+end
+
+local function BestLines(data, isRecord, isFirst, gain, firstLabel)
+    local lines = { " " }
+    if isFirst then
+        lines[#lines+1] = "|cff00ccff" .. firstLabel .. "|r"
+    elseif isRecord then
+        lines[#lines+1] = string.format("|cffFFD700New personal record!|r |cff00ff00(+%.1f)|r", gain)
+    elseif data.bestRatio then
+        lines[#lines+1] = string.format("Personal best: |cff00ff00%.1f%%|r |cff888888[%s]|r",
+            100 - data.bestRatio, data.bestDate or "?")
     end
+    return lines
+end
 
-    lastCombatTime = sessionCombatTime
-    lastCombatIdle = sessionIdleTime
-
-    local st = CharABCRDB.sessionTrivial
-    local ratio = sessionCombatTime > 0 and (sessionIdleTime/sessionCombatTime)*100 or 0
-    st.totalTime = st.totalTime + sessionCombatTime
-    st.idleTime  = st.idleTime  + sessionIdleTime
-
-    if ABCReminderDB.showSessionResults and ABCReminderDB.sessionDisplay == "window" then
-        ShowResultFrame(instanceName or "Session", ratio, nil, false, nil, false)
-    end
-    UpdateSessionFrame()
-    sessionCombatTime, sessionIdleTime = 0, 0
+local function Concat(a, b)
+    for _, v in ipairs(b) do a[#a+1] = v end
+    return a
 end
 
 -- =========================
--- UI: SQW Circular Visual
+-- Session M+
 -- =========================
-local sqwFrame = CreateFrame("Frame", "ABCReminderSQW", UIParent)
-sqwFrame:SetSize(50, 50); sqwFrame:SetMovable(true); sqwFrame:EnableMouse(false)
-sqwFrame:RegisterForDrag("LeftButton")
-sqwFrame:SetScript("OnDragStart", sqwFrame.StartMoving)
-sqwFrame:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    local point, _, _, x, y = self:GetPoint()
-    ABCReminderDB.sqwPosition = { point=point, x=x, y=y }
-end)
-
-sqwFrame.fill = sqwFrame:CreateTexture(nil, "BORDER")
-sqwFrame.fill:SetAllPoints()
-sqwFrame.fill:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
-sqwFrame.fill:SetVertexColor(0, 1, 0, 0.85)
-
-sqwFrame.cd = CreateFrame("Cooldown", nil, sqwFrame, "CooldownFrameTemplate")
-sqwFrame.cd:SetAllPoints(); sqwFrame.cd:SetDrawEdge(false); sqwFrame.cd:SetDrawSwipe(true)
-sqwFrame.cd:SetSwipeColor(0, 0, 0, 1); sqwFrame.cd:SetReverse(false)
-sqwFrame.cd:SetHideCountdownNumbers(true)
-sqwFrame.cd:SetSwipeTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
-sqwFrame.cd:SetDrawBling(false)
-
-sqwFrame.moveTex = sqwFrame:CreateTexture(nil, "OVERLAY")
-sqwFrame.moveTex:SetAllPoints()
-sqwFrame.moveTex:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
-sqwFrame.moveTex:SetVertexColor(0, 0.5, 1, 0.5); sqwFrame.moveTex:Hide()
-
-local function UpdateSQWVisual(remaining)
-    if not ABCReminderDB.showSQW then
-        if not isMovingSQW then sqwFrame:Hide() end; return
+local function GetKeystoneLevel()
+    if C_ChallengeMode.GetActiveKeystoneInfo then
+        local level = C_ChallengeMode.GetActiveKeystoneInfo()
+        if type(level) == "number" and level > 0 then return level end
     end
-    if isMovingSQW then return end
-    local threshold = GetSQW()
-    local inWindow  = remaining and remaining > 0 and remaining <= threshold
-    local showGray  = ABCReminderDB.alwaysShowSQW and remaining and remaining > threshold
-    if inWindow then
-        sqwFrame.fill:SetVertexColor(0, 1, 0, 0.85); sqwFrame.cd:SetSwipeColor(0, 0, 0, 0.85)
-        sqwFrame.cd:SetCooldown(GetTime() - (threshold-remaining), threshold); sqwFrame:Show()
-    elseif showGray then
-        sqwFrame.fill:SetVertexColor(0.3, 0.3, 0.3, 0.4); sqwFrame.cd:SetCooldown(0,0); sqwFrame:Show()
-    else sqwFrame:Hide() end
+    return nil
+end
+
+local function GetCompletionDetails()
+    if C_ChallengeMode.GetChallengeCompletionInfo then
+        local ok, info = pcall(C_ChallengeMode.GetChallengeCompletionInfo)
+        if ok and type(info) == "table" then return info.level, info.onTime end
+    end
+    return nil, nil
+end
+
+local function StartMPlusSession(resumed)
+    local mapID = C_ChallengeMode.GetActiveChallengeMapID()
+    local name  = mapID and C_ChallengeMode.GetMapUIInfo(mapID) or "M+ Unknown"
+    mplus = { name = name, level = GetKeystoneLevel(), fight = NewFight(), bosses = {}, resumed = resumed }
+end
+
+local function EndMPlusSession(completed)
+    if not mplus then return end
+    local m = mplus
+    mplus = nil
+    -- pull still in progress when the key ends (e.g. leaving mid-combat)
+    if fight.time > 0 and not encounterActive then
+        CloseGap(fight); AddFight(m.fight, fight); fight = NewFight()
+    end
+    local f = m.fight
+    CloseGap(f)
+    if f.time <= 0 then return end
+    if not completed and not ABCReminderDB.recordWipes then return end
+    -- a session resumed after /reload can't tell "left the key" from "reloaded after finishing it"
+    if not completed and m.resumed then return end
+
+    local level, onTime = m.level, nil
+    if completed then
+        local cLevel, cOnTime = GetCompletionDetails()
+        level, onTime = cLevel or level, cOnTime
+    end
+
+    local perInstance = CharABCRDB.statistics.perInstance
+    perInstance[m.name] = perInstance[m.name] or { totalTime=0, idleTime=0 }
+    local data = perInstance[m.name]
+    local prev = LastSuccess(data)
+
+    local att = MakeAttempt(f, completed)
+    att.level, att.onTime, att.bosses = level, onTime, m.bosses
+
+    local isRecord, isFirst, gain = false, false, nil
+    if completed then
+        data.runs      = (data.runs or 0) + 1
+        data.totalTime = (data.totalTime or 0) + f.time
+        data.idleTime  = (data.idleTime  or 0) + f.idle
+        -- a run resumed after /reload is missing its start: keep it, but not as a record
+        if not m.resumed then isRecord, isFirst, gain = UpdateBest(data, f, level) end
+    else
+        data.abandoned = (data.abandoned or 0) + 1
+    end
+    PushAttempt(data, att)
+
+    local lvlStr = level and (" +" .. level) or ""
+    local title
+    if not completed then title = "|cff888888" .. m.name .. lvlStr .. " (abandoned)|r"
+    elseif isRecord then title = "|cffFFD700" .. m.name .. lvlStr .. "|r"
+    else title = "|cff00ccff" .. m.name .. lvlStr .. "|r" end
+
+    local lines = FightLines(f, completed and prev or nil)
+    if completed then
+        local status = (onTime == true and "|cff00ff00timed|r") or (onTime == false and "|cffff9900over time|r") or nil
+        if status then lines[#lines+1] = "Key: " .. status end
+        if m.resumed then lines[#lines+1] = "|cff888888Partial (reloaded during the key)|r" end
+    end
+    if #m.bosses > 0 then
+        lines[#lines+1] = " "
+        for _, b in ipairs(m.bosses) do
+            lines[#lines+1] = string.format("  %s: %s", b.name, ColorPct(100 - b.ratio))
+        end
+    end
+    if completed then Concat(lines, BestLines(data, isRecord, isFirst, gain, "First run recorded")) end
+    ShowResultFrame(title, lines)
+    ABCPrint(string.format("%s%s: %.1f%% active over %s%s", m.name, lvlStr, ActivePct(f.time, f.idle),
+        FormatDuration(f.time), completed and "" or " (abandoned)"))
+end
+
+-- =========================
+-- Logic: end of a pull
+-- =========================
+local function FlushTrash(label)
+    local f = fight
+    fight = NewFight()
+    CloseGap(f)
+    if mplus then
+        if f.time > 0 then AddFight(mplus.fight, f) end
+        return
+    end
+    if f.time < MIN_PULL then return end
+
+    local instanceName, instanceType = GetInstanceInfo()
+    -- in raids only boss encounters are measured; trash is ignored
+    if instanceType == "raid" then return end
+    if not ABCReminderDB.enabledInstances[instanceType or "none"] then return end
+
+    lastFight = f
+    local st = CharABCRDB.sessionTrivial
+    st.totalTime = st.totalTime + f.time
+    st.idleTime  = st.idleTime  + f.idle
+
+    if ABCReminderDB.showSessionResults and ABCReminderDB.sessionDisplay == "window" then
+        local lines = FightLines(f, nil)
+        lines[#lines+1] = " "
+        lines[#lines+1] = string.format("Session: %s over %s",
+            ColorPct(ActivePct(st.totalTime, st.idleTime)), FormatDuration(st.totalTime))
+        local name = label or (instanceType == "none" and GetZoneText()) or instanceName or "Session"
+        ShowResultFrame("|cffffd100" .. name .. "|r", lines)
+    end
+    UpdateSessionFrame()
+end
+
+local function FinishMPlusBoss(encounterName, success)
+    local f = fight
+    fight = NewFight()
+    CloseGap(f)
+    AddFight(mplus.fight, f)  -- wipes are part of the key's combat time too
+    if f.time <= 0 then return end
+    if success then
+        table.insert(mplus.bosses, { name = encounterName, ratio = (f.idle / f.time) * 100 })
+    elseif not ABCReminderDB.recordWipes then
+        return
+    end
+    local lines = FightLines(f, nil)
+    lines[#lines+1] = " "
+    lines[#lines+1] = string.format("Key so far: %s over %s",
+        ColorPct(ActivePct(mplus.fight.time, mplus.fight.idle)), FormatDuration(mplus.fight.time))
+    local title = success and ("|cffffd100" .. encounterName .. " (M+)|r")
+                          or ("|cff888888" .. encounterName .. " (M+ wipe)|r")
+    ShowResultFrame(title, lines)
+end
+
+local function FinishRaidBoss(encounterName, difficultyID, success)
+    local f = fight
+    fight = NewFight()
+    CloseGap(f)
+    if f.time < (ABCReminderDB.minRaidBossDuration or 40) then return end
+    if not success and not ABCReminderDB.recordWipes then return end
+
+    local diffName = GetDifficultyInfo(difficultyID) or tostring(difficultyID)
+    local key  = "Boss: " .. encounterName .. " [" .. diffName .. "]"
+    local perBoss = CharABCRDB.statistics.perBoss
+    perBoss[key] = perBoss[key] or { totalTime=0, idleTime=0 }
+    local data = perBoss[key]
+    data.difficultyID = difficultyID
+
+    local prev = LastSuccess(data)
+    local isRecord, isFirst, gain = false, false, nil
+    if success then
+        data.kills     = (data.kills or 0) + 1
+        data.totalTime = (data.totalTime or 0) + f.time
+        data.idleTime  = (data.idleTime  or 0) + f.idle
+        isRecord, isFirst, gain = UpdateBest(data, f, nil)
+    else
+        data.wipes = (data.wipes or 0) + 1
+    end
+    PushAttempt(data, MakeAttempt(f, success))
+
+    local display = encounterName .. " [" .. diffName .. "]"
+    local title
+    if not success then title = "|cff888888" .. display .. " (wipe)|r"
+    elseif isRecord then title = "|cffFFD700" .. display .. "|r"
+    else title = "|cff00ccff" .. display .. "|r" end
+
+    local lines = FightLines(f, success and prev or nil)
+    if success then Concat(lines, BestLines(data, isRecord, isFirst, gain, "First kill recorded")) end
+    ShowResultFrame(title, lines)
+    ABCPrint(string.format("%s: %.1f%% active over %s%s", display, ActivePct(f.time, f.idle),
+        FormatDuration(f.time), success and "" or " (wipe)"))
+end
+
+local function OnEncounterEnd(encounterName, difficultyID, success)
+    encounterActive = false
+    if mplus then
+        FinishMPlusBoss(encounterName, success)
+    elseif select(2, GetInstanceInfo()) == "raid" then
+        FinishRaidBoss(encounterName, difficultyID, success)
+    else
+        FlushTrash(encounterName)  -- normal dungeon / scenario / delve boss
+    end
+end
+
+-- =========================
+-- Saved variables init
+-- =========================
+local function InitSavedVariables()
+    ABCReminderDB = ABCReminderDB or {}
+    CharABCRDB    = CharABCRDB    or {}
+    ApplyDefaults(DB_DEFAULTS,   ABCReminderDB)
+    ApplyDefaults(CHAR_DEFAULTS, CharABCRDB)
+
+    local db = ABCReminderDB
+    if db.sessionChatDedicated ~= nil then
+        if db.sessionChatDedicated == true then db.sessionDisplay = "tab" end
+        db.sessionChatDedicated = nil
+    end
+    -- removed features
+    db.showSQW, db.alwaysShowSQW, db.sqwPosition, db.trackOutsideInstance = nil, nil, nil, nil
+
+    db.statsPosition     = ValidatePosition(db.statsPosition,     DB_DEFAULTS.statsPosition)
+    db.bossStatsPosition = ValidatePosition(db.bossStatsPosition, DB_DEFAULTS.bossStatsPosition)
+    db.historyPosition   = ValidatePosition(db.historyPosition,   DB_DEFAULTS.historyPosition)
+
+    local stats = CharABCRDB.statistics
+    stats.perInstance = stats.perInstance or {}
+    stats.perBoss     = stats.perBoss     or {}
+
+    local function Place(f, pos)
+        f:ClearAllPoints()
+        f:SetPoint(pos.point, UIParent, pos.point, pos.x, pos.y)
+    end
+    Place(statsTable,   db.statsPosition)
+    Place(resultFrame,  db.bossStatsPosition)
+    Place(historyFrame, db.historyPosition)
 end
 
 -- =========================
 -- Engine & Events
 -- =========================
 local frame = CreateFrame("Frame")
+frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+frame:RegisterEvent("ENCOUNTER_START")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("CHALLENGE_MODE_START")
 frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
+frame:RegisterEvent("CHALLENGE_MODE_RESET")
 frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 
+local function OnUpdate(_, delta)
+    if not inCombat then return end
+    if not IsEnabledForCurrentSpec() then StopReminderSound(); return end
+    if UnitIsDeadOrGhost("player") then
+        -- time spent dead is neither active nor idle
+        CloseGap(fight)
+        if ABCReminderDB.clipSound then StopReminderSound() end
+        return
+    end
 
-frame:SetScript("OnEvent", function(_, event, ...)
-    if event == "PLAYER_ENTERING_WORLD" then
+    local busy = IsBusy()
+    fight.time = fight.time + delta
+    if busy then
+        CloseGap(fight)
+    else
+        fight.idle   = fight.idle + delta
+        fight.curGap = fight.curGap + delta
+    end
+
+    checkElapsed = checkElapsed + delta
+    if checkElapsed < 0.1 then return end
+    checkElapsed = 0
+
+    local _, it = IsInInstance()
+    if ABCReminderDB.enabledInstances[it or "none"] and not busy then
+        if not wasEligible or soundElapsed >= ABCReminderDB.soundInterval then
+            local _, handle = PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
+            soundHandle = handle
+            wasEligible, soundElapsed = true, 0
+        else
+            soundElapsed = soundElapsed + 0.1
+        end
+    else
+        if ABCReminderDB.clipSound and soundHandle and busy then
+            StopSound(soundHandle); soundHandle = nil
+        end
+        wasEligible, soundElapsed = false, 0
+    end
+end
+
+frame:SetScript("OnEvent", function(self, event, ...)
+    if event == "ADDON_LOADED" then
+        if ... ~= "ABCReminder" then return end
+        self:UnregisterEvent("ADDON_LOADED")
+        InitSavedVariables()
+        self:SetScript("OnUpdate", OnUpdate)
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
         local _, instanceType = IsInInstance()
         if instanceType and instanceType ~= "none" then
             CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=false }
-            lastCombatTime, lastCombatIdle = 0, 0
+            lastFight = nil
         end
-        CharABCRDB.statistics = CharABCRDB.statistics or {}
-        if not CharABCRDB.statistics.perBoss then
-            CharABCRDB.statistics = { perInstance={}, perBoss={} }
+        -- encounter that ended while we were away (release, disconnect…)
+        if encounterActive and not IsEncounterInProgress() then
+            encounterActive = false
+            fight = NewFight()
         end
-        CharABCRDB.statistics.perInstance = CharABCRDB.statistics.perInstance or {}
-        CharABCRDB.statistics.perBoss     = CharABCRDB.statistics.perBoss     or {}
-        CharABCRDB.sessionTrivial = CharABCRDB.sessionTrivial or { totalTime=0, idleTime=0, outsideOnly=true }
-        CharABCRDB.disabledSpecs  = CharABCRDB.disabledSpecs  or {}
-
-        local db = ABCReminderDB
-        db.intervalStatsDisplay  = db.intervalStatsDisplay  or 15
-        if db.showSessionResults == nil then db.showSessionResults = true  end
-        if db.sessionDisplay     == nil then db.sessionDisplay     = "window" end
-        if db.sessionChatDedicated ~= nil then
-            if db.sessionChatDedicated == true then db.sessionDisplay = "tab" end
-            db.sessionChatDedicated = nil
+        -- keep the M+ session in sync with the game (left the key / reloaded inside it)
+        local keyActive = C_ChallengeMode.IsChallengeModeActive and C_ChallengeMode.IsChallengeModeActive()
+        if mplus and not keyActive then
+            EndMPlusSession(false)
+        elseif keyActive and not mplus then
+            StartMPlusSession(true)
         end
-        db.minRaidBossDuration = db.minRaidBossDuration or 40
-
-        db.sqwPosition       = ValidatePosition(db.sqwPosition,       { point="CENTER", x=0,   y=-150 })
-        db.statsPosition     = ValidatePosition(db.statsPosition,     { point="LEFT",   x=40,  y=0    })
-        db.bossStatsPosition = ValidatePosition(db.bossStatsPosition, { point="RIGHT",  x=-40, y=0    })
-        db.historyPosition   = ValidatePosition(db.historyPosition,   { point="LEFT",   x=40,  y=200  })
-
-        sqwFrame:ClearAllPoints()
-        sqwFrame:SetPoint(db.sqwPosition.point, UIParent, db.sqwPosition.point, db.sqwPosition.x, db.sqwPosition.y)
-        statsTable:ClearAllPoints()
-        statsTable:SetPoint(db.statsPosition.point, UIParent, db.statsPosition.point, db.statsPosition.x, db.statsPosition.y)
-        resultFrame:ClearAllPoints()
-        resultFrame:SetPoint(db.bossStatsPosition.point, UIParent, db.bossStatsPosition.point, db.bossStatsPosition.x, db.bossStatsPosition.y)
-        historyFrame:ClearAllPoints()
-        historyFrame:SetPoint(db.historyPosition.point, UIParent, db.historyPosition.point, db.historyPosition.x, db.historyPosition.y)
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
-        -- Rafraîchir le panneau si ouvert pour refléter la nouvelle spec active
-        if panel and panel:IsShown() then
-            RefreshPanelDynamic()
-        end
+        if panel and panel:IsShown() then RefreshPanelDynamic() end
 
     elseif event == "PLAYER_REGEN_DISABLED" then
         inCombat = true
 
     elseif event == "PLAYER_REGEN_ENABLED" then
         inCombat = false
-        if mPlusActive then
-            mPlusCombatTime = mPlusCombatTime + sessionCombatTime
-            mPlusIdleTime   = mPlusIdleTime   + sessionIdleTime
-            sessionCombatTime, sessionIdleTime = 0, 0
-        else
-            ProcessCombatEnd()
-        end
+        if ABCReminderDB.clipSound then StopReminderSound() else wasEligible, soundElapsed = false, 0 end
+        -- during a boss (death, phase transition) keep accumulating into the same fight
+        if not encounterActive then FlushTrash() end
+
+    elseif event == "ENCOUNTER_START" then
+        if fight.time > 0 then FlushTrash() end  -- trash pulled into the boss
+        fight = NewFight()
+        encounterActive = true
 
     elseif event == "ENCOUNTER_END" then
-        local _, encounterName, _, _, success = ...
-        ProcessCombatEnd(encounterName, success == 1)
+        -- ignore an END without a matching START (duplicate END after a kill, or /reload mid-boss)
+        if not encounterActive then return end
+        local _, encounterName, difficultyID, _, success = ...
+        OnEncounterEnd(encounterName or "Unknown", difficultyID, success == 1)
 
     elseif event == "CHALLENGE_MODE_START" then
-        StartMPlusSession()
+        StartMPlusSession(false)
 
     elseif event == "CHALLENGE_MODE_COMPLETED" then
         EndMPlusSession(true)
-    end
-end)
 
-frame:SetScript("OnUpdate", function(_, delta)
-    if not IsEnabledForCurrentSpec() then sqwFrame:Hide() return end
-    if isMovingSQW then
-        sqwFrame:Show(); sqwFrame.moveTex:Show()
-        sqwFrame.fill:SetVertexColor(0, 0.5, 1, 0.7); sqwFrame.cd:SetCooldown(0,0)
-    else
-        sqwFrame.moveTex:Hide(); UpdateSQWVisual(GetCurrentActionProgress())
-    end
-
-    if inCombat then
-        sessionCombatTime = sessionCombatTime + delta
-        local isBusy = UnitCastingInfo("player") or UnitChannelInfo("player")
-        local cd = C_Spell.GetSpellCooldown(61304)
-        if not isBusy and not (cd and cd.startTime > 0) then sessionIdleTime = sessionIdleTime + delta end
-
-        checkElapsed = checkElapsed + delta
-        if checkElapsed >= 0.1 then
-            checkElapsed = 0
-            local _, it = IsInInstance()
-            local outsideBlocked = (not it or it=="none") and not ABCReminderDB.trackOutsideInstance
-            if outsideBlocked then
-                if ABCReminderDB.clipSound and soundHandle then StopSound(soundHandle); soundHandle=nil end
-                wasEligible, soundElapsed = false, 0
-                return
-            end
-            if ABCReminderDB.enabledInstances[it or "none"] and not isBusy and not (cd and cd.startTime>0) then
-                if not wasEligible or soundElapsed >= ABCReminderDB.soundInterval then
-                    _, soundHandle = PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel)
-                    wasEligible, soundElapsed = true, 0
-                else soundElapsed = soundElapsed + 0.1 end
-            else
-                if ABCReminderDB.clipSound and soundHandle and (isBusy or (cd and cd.startTime>0)) then
-                    StopSound(soundHandle); soundHandle=nil
-                end
-                wasEligible, soundElapsed = false, 0
-            end
-        end
+    elseif event == "CHALLENGE_MODE_RESET" then
+        EndMPlusSession(false)
     end
 end)
 
 -- =========================
 -- Options Panel
 -- =========================
-local panel = CreateFrame("Frame", "ABCReminderOptions")
+panel = CreateFrame("Frame", "ABCReminderOptions")
 panel.name = "ABCReminder"
 
 -- Références aux widgets dynamiques, stockées après l'init
@@ -761,17 +1021,22 @@ panel.name = "ABCReminder"
 local dynWidgets = {}
 
 -- Appelé à chaque OnShow ET depuis PLAYER_SPECIALIZATION_CHANGED
--- Met à jour uniquement les valeurs qui peuvent changer en dehors du panneau.
-local function RefreshPanelDynamic()
-    -- 1. Sync charEnable (peut être togglé via clic minimap)
+RefreshPanelDynamic = function()
     if dynWidgets.charEnable then
         dynWidgets.charEnable:SetChecked(CharABCRDB.enabled)
     end
-
-    -- 2. Sync specs : reconstruire les checkboxes (spec active peut avoir changé)
     if dynWidgets.BuildSpecCheckboxes then
         dynWidgets.BuildSpecCheckboxes()
     end
+end
+
+local function SectionHeader(C, anchor, text, yOff)
+    local h = C:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    h:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, yOff)
+    h:SetText("|cffffd100" .. text .. "|r")
+    local l = C:CreateTexture(nil, "ARTWORK"); l:SetSize(460, 1)
+    l:SetPoint("TOPLEFT", h, "BOTTOMLEFT", 0, -3); l:SetColorTexture(0.4, 0.4, 0.4, 0.6)
+    return h
 end
 
 panel:SetScript("OnShow", function(self)
@@ -795,95 +1060,18 @@ panel:SetScript("OnShow", function(self)
         mainTitle:SetPoint("TOPLEFT", 16, -16); mainTitle:SetText("ABCReminder")
 
         -- ── Section : General ──────────────────────────────────────────────
-        local hGen = C:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hGen:SetPoint("TOPLEFT", mainTitle, "BOTTOMLEFT", 0, -10)
-        hGen:SetText("|cffffd100General|r")
-        local lGen = C:CreateTexture(nil, "ARTWORK"); lGen:SetSize(460, 1)
-        lGen:SetPoint("TOPLEFT", hGen, "BOTTOMLEFT", 0, -3); lGen:SetColorTexture(0.4, 0.4, 0.4, 0.6)
+        local hGen = SectionHeader(C, mainTitle, "General", -10)
 
         local charEnable = CreateFrame("CheckButton", nil, C, "InterfaceOptionsCheckButtonTemplate")
         charEnable:SetPoint("TOPLEFT", hGen, "BOTTOMLEFT", 0, -14)
         charEnable.Text:SetText("Enable for this character")
         charEnable:SetChecked(CharABCRDB.enabled)
         charEnable:SetScript("OnClick", function(cb) CharABCRDB.enabled = cb:GetChecked() end)
-        dynWidgets.charEnable = charEnable  -- référence pour refresh
+        dynWidgets.charEnable = charEnable
 
-        -- ── Section : Specializations ──────────────────────────────────────
-        local hSpec = C:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hSpec:SetPoint("TOPLEFT", charEnable, "BOTTOMLEFT", 0, -12)
-        hSpec:SetText("|cffffd100Specializations|r")
-        local lSpec = C:CreateTexture(nil, "ARTWORK"); lSpec:SetSize(460, 1)
-        lSpec:SetPoint("TOPLEFT", hSpec, "BOTTOMLEFT", 0, -3); lSpec:SetColorTexture(0.4, 0.4, 0.4, 0.6)
-
-        local specNote = C:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        specNote:SetPoint("TOPLEFT", hSpec, "BOTTOMLEFT", 0, -16)
-        specNote:SetText("|cffaaaaaaUncheck to disable ABCReminder for that specialization|r")
-
-        -- Conteneur de hauteur fixe (4 specs max = 4×26 px)
-        -- Les sections suivantes sont ancrées dessus, pas sur les specs elles-mêmes,
-        -- ce qui évite de recalculer toute la chaîne d'ancres à chaque rebuild.
-        local specContainer = CreateFrame("Frame", nil, C)
-        specContainer:SetPoint("TOPLEFT", specNote, "BOTTOMLEFT", 0, -6)
-        specContainer:SetSize(460, 52)
-
-        local function BuildSpecCheckboxes()
-            -- Nettoyer les anciens widgets du conteneur
-            for _, child in ipairs({ specContainer:GetChildren() }) do
-                child:Hide(); child:SetParent(nil)
-            end
-
-            local numSpecs = GetNumSpecializations()
-            if numSpecs == 0 then return end
-
-            local currentSpecIndex = GetSpecialization()
-            local currentSpecID    = currentSpecIndex and select(1, GetSpecializationInfo(currentSpecIndex)) or nil
-
-            local prevCb, prevCbR = nil,nil
-            for i = 1, numSpecs do
-                local specID, specName, _, specIcon = GetSpecializationInfo(i)
-                if specID then
-                    local cb = CreateFrame("CheckButton", nil, specContainer, "InterfaceOptionsCheckButtonTemplate")
-                    if i%2 ~= 0 then
-                         cb:SetPoint("TOPLEFT", prevCb or specContainer, prevCb and "BOTTOMLEFT" or "TOPLEFT", 0, prevCb and 2 or 0)
-                         prevCb = cb
-                    else
-                         cb:SetPoint("TOPLEFT", prevCbR, "TOPLEFT", 200, 0)
-                    end
-
-                    -- Icône de spec à droite du label
-                    local icon = cb:CreateTexture(nil, "OVERLAY")
-                    icon:SetSize(16, 16)
-                    icon:SetPoint("LEFT", cb.Text, "RIGHT", 4, 0)
-                    icon:SetTexture(specIcon)
-                    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-
-                    local isActive = (specID == currentSpecID)
-                    cb.Text:SetText(specName .. (isActive and " |cffffd100(active)|r" or ""))
-                    cb:SetChecked(not (CharABCRDB.disabledSpecs and CharABCRDB.disabledSpecs[specID]))
-
-                    local capturedID = specID
-                    cb:SetScript("OnClick", function(btn)
-                        CharABCRDB.disabledSpecs = CharABCRDB.disabledSpecs or {}
-                        if btn:GetChecked() then
-                            CharABCRDB.disabledSpecs[capturedID] = nil
-                        else
-                            CharABCRDB.disabledSpecs[capturedID] = true
-                        end
-                    end)
-                    if i%2 ~= 0 then prevCbR = cb end
-                end
-            end
-        end
-
-        BuildSpecCheckboxes()
-        dynWidgets.BuildSpecCheckboxes = BuildSpecCheckboxes  -- référence pour refresh
-
-        -- ── Section : Sound ────────────────────────────────────────────────
-        local hSnd = C:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hSnd:SetPoint("TOPLEFT", specContainer, "BOTTOMLEFT", 0, -12)
-        hSnd:SetText("|cffffd100Sound|r")
-        local lSnd = C:CreateTexture(nil, "ARTWORK"); lSnd:SetSize(460, 1)
-        lSnd:SetPoint("TOPLEFT", hSnd, "BOTTOMLEFT", 0, -3); lSnd:SetColorTexture(0.4, 0.4, 0.4, 0.6)
+        local trackNote = C:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        trackNote:SetPoint("TOPLEFT", charEnable, "BOTTOMLEFT", 0, -8)
+        trackNote:SetText("|cffaaaaaaTrack statistics and play reminders in:|r")
 
         local instKeys = {}
         for k in pairs(ABCReminderDB.enabledInstances) do table.insert(instKeys, k) end
@@ -892,7 +1080,7 @@ panel:SetScript("OnShow", function(self)
         for idx, inst in ipairs(instKeys) do
             local cb = CreateFrame("CheckButton", nil, C, "InterfaceOptionsCheckButtonTemplate")
             if idx % 2 ~= 0 then
-                cb:SetPoint("TOPLEFT", idx == 1 and hSnd or lastInstCb, idx == 1 and "BOTTOMLEFT" or "BOTTOMLEFT", 0, idx == 1 and -14 or 2)
+                cb:SetPoint("TOPLEFT", idx == 1 and trackNote or lastInstCb, "BOTTOMLEFT", 0, idx == 1 and -4 or 2)
                 firstLeft = cb
             else
                 cb:SetPoint("TOPLEFT", firstLeft, "TOPLEFT", 200, 0)
@@ -906,8 +1094,69 @@ panel:SetScript("OnShow", function(self)
             if idx % 2 ~= 0 then lastInstCb = cb end
         end
 
+        -- ── Section : Specializations ──────────────────────────────────────
+        local hSpec = SectionHeader(C, lastInstCb, "Specializations", -12)
+
+        local specNote = C:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        specNote:SetPoint("TOPLEFT", hSpec, "BOTTOMLEFT", 0, -16)
+        specNote:SetText("|cffaaaaaaUncheck to disable ABCReminder for that specialization|r")
+
+        -- Conteneur de hauteur fixe : les sections suivantes sont ancrées dessus
+        local specContainer = CreateFrame("Frame", nil, C)
+        specContainer:SetPoint("TOPLEFT", specNote, "BOTTOMLEFT", 0, -6)
+        specContainer:SetSize(460, 52)
+
+        local function BuildSpecCheckboxes()
+            for _, child in ipairs({ specContainer:GetChildren() }) do
+                child:Hide(); child:SetParent(nil)
+            end
+
+            local numSpecs = GetNumSpecializations()
+            if numSpecs == 0 then return end
+
+            local currentSpecIndex = GetSpecialization()
+            local currentSpecID    = currentSpecIndex and (GetSpecializationInfo(currentSpecIndex)) or nil
+
+            local prevCb, prevCbR = nil, nil
+            for i = 1, numSpecs do
+                local specID, specName, _, specIcon = GetSpecializationInfo(i)
+                if specID then
+                    local cb = CreateFrame("CheckButton", nil, specContainer, "InterfaceOptionsCheckButtonTemplate")
+                    if i % 2 ~= 0 then
+                        cb:SetPoint("TOPLEFT", prevCb or specContainer, prevCb and "BOTTOMLEFT" or "TOPLEFT", 0, prevCb and 2 or 0)
+                        prevCb = cb
+                    else
+                        cb:SetPoint("TOPLEFT", prevCbR, "TOPLEFT", 200, 0)
+                    end
+
+                    local icon = cb:CreateTexture(nil, "OVERLAY")
+                    icon:SetSize(16, 16)
+                    icon:SetPoint("LEFT", cb.Text, "RIGHT", 4, 0)
+                    icon:SetTexture(specIcon)
+                    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+                    local isActive = (specID == currentSpecID)
+                    cb.Text:SetText(specName .. (isActive and " |cffffd100(active)|r" or ""))
+                    cb:SetChecked(not (CharABCRDB.disabledSpecs and CharABCRDB.disabledSpecs[specID]))
+
+                    local capturedID = specID
+                    cb:SetScript("OnClick", function(btn)
+                        CharABCRDB.disabledSpecs = CharABCRDB.disabledSpecs or {}
+                        CharABCRDB.disabledSpecs[capturedID] = (not btn:GetChecked()) or nil
+                    end)
+                    if i % 2 ~= 0 then prevCbR = cb end
+                end
+            end
+        end
+
+        BuildSpecCheckboxes()
+        dynWidgets.BuildSpecCheckboxes = BuildSpecCheckboxes
+
+        -- ── Section : Sound ────────────────────────────────────────────────
+        local hSnd = SectionHeader(C, specContainer, "Sound", -12)
+
         local slider = CreateFrame("Slider", "ABCReminderSlider", C, "OptionsSliderTemplate")
-        slider:SetPoint("TOPLEFT", lastInstCb, "BOTTOMLEFT", 6, -22)
+        slider:SetPoint("TOPLEFT", hSnd, "BOTTOMLEFT", 6, -28)
         slider:SetMinMaxValues(1.0, 10.0); slider:SetValueStep(0.5); slider:SetObeyStepOnDrag(true)
         slider:SetValue(ABCReminderDB.soundInterval)
         slider.Text:SetText("Sound Interval (s)"); slider.Low:SetText("1"); slider.High:SetText("10")
@@ -956,52 +1205,16 @@ panel:SetScript("OnShow", function(self)
         testBtn:SetPoint("TOPLEFT", sndDrop, "TOPRIGHT", 6, -4); testBtn:SetSize(80, 22); testBtn:SetText("Test Sound")
         testBtn:SetScript("OnClick", function() PlaySoundFile(soundFiles[ABCReminderDB.soundFile], ABCReminderDB.soundChannel) end)
 
-        -- ── Section : SQW ──────────────────────────────────────────────────
-        local hSQW = C:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hSQW:SetPoint("TOPLEFT", chanLabel, "BOTTOMLEFT", 0, -22)
-        hSQW:SetText("|cffffd100Spell Queue Window|r")
-        local lSQW = C:CreateTexture(nil, "ARTWORK"); lSQW:SetSize(460, 1)
-        lSQW:SetPoint("TOPLEFT", hSQW, "BOTTOMLEFT", 0, -3); lSQW:SetColorTexture(0.4, 0.4, 0.4, 0.6)
-
-        local sqwCb = CreateFrame("CheckButton", nil, C, "InterfaceOptionsCheckButtonTemplate")
-        sqwCb:SetPoint("TOPLEFT", hSQW, "BOTTOMLEFT", 0, -14)
-        sqwCb.Text:SetText("Show Spell Queue Window visual")
-        sqwCb:SetChecked(ABCReminderDB.showSQW)
-        sqwCb:SetScript("OnClick", function(cb) ABCReminderDB.showSQW = cb:GetChecked() end)
-
-        local sqwMiniIcon = sqwCb:CreateTexture(nil, "OVERLAY")
-        sqwMiniIcon:SetTexture("Interface\\AddOns\\ABCReminder\\img\\circle.tga")
-        sqwMiniIcon:SetSize(12, 12); sqwMiniIcon:SetPoint("LEFT", sqwCb.Text, "RIGHT", 6, 0)
-        sqwMiniIcon:SetVertexColor(0, 1, 0, 1)
-
-        local resetPosBtn = CreateFrame("Button", nil, C, "UIPanelButtonTemplate")
-        resetPosBtn:SetPoint("LEFT", sqwMiniIcon, "RIGHT", 10, 0)
-        resetPosBtn:SetSize(130, 22); resetPosBtn:SetText("Reset SQW Position")
-        resetPosBtn:SetScript("OnClick", function()
-            ABCReminderDB.sqwPosition = { point="CENTER", x=0, y=-150 }
-            sqwFrame:ClearAllPoints(); sqwFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -150)
-        end)
-
-        local alwaysCb = CreateFrame("CheckButton", nil, C, "InterfaceOptionsCheckButtonTemplate")
-        alwaysCb:SetPoint("TOPLEFT", sqwCb, "BOTTOMLEFT", 20, -4)
-        alwaysCb.Text:SetText("Always show (in combat - grayed when not in window)")
-        alwaysCb:SetChecked(ABCReminderDB.alwaysShowSQW)
-        alwaysCb:SetScript("OnClick", function(cb) ABCReminderDB.alwaysShowSQW = cb:GetChecked() end)
-
         -- ── Section : Statistics ───────────────────────────────────────────
-        local hStat = C:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hStat:SetPoint("TOPLEFT", alwaysCb, "BOTTOMLEFT", -20, -14)
-        hStat:SetText("|cffffd100Statistics|r")
-        local lStat = C:CreateTexture(nil, "ARTWORK"); lStat:SetSize(460, 1)
-        lStat:SetPoint("TOPLEFT", hStat, "BOTTOMLEFT", 0, -3); lStat:SetColorTexture(0.4, 0.4, 0.4, 0.6)
+        local hStat = SectionHeader(C, chanLabel, "Statistics", -22)
 
         local statsDisplay = CreateFrame("Slider", "ABCRStatsDur", C, "OptionsSliderTemplate")
-        statsDisplay:SetPoint("TOPLEFT", hStat, "BOTTOMLEFT", 0, -22)
+        statsDisplay:SetPoint("TOPLEFT", hStat, "BOTTOMLEFT", 0, -28)
         statsDisplay:SetMinMaxValues(0, 30); statsDisplay:SetValueStep(5); statsDisplay:SetObeyStepOnDrag(true)
         statsDisplay:SetValue(ABCReminderDB.intervalStatsDisplay)
         statsDisplay.Text:SetJustifyH("LEFT"); statsDisplay.Text:ClearAllPoints()
         statsDisplay.Text:SetPoint("TOPLEFT", statsDisplay, "TOPLEFT", 0, 14)
-        statsDisplay.Text:SetText("Floating window fade-out delay (o = disabled)")
+        statsDisplay.Text:SetText("Floating window fade-out delay (0 = stays open)")
         statsDisplay.Low:SetText("0"); statsDisplay.High:SetText("30s")
         local statsValTxt = statsDisplay:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         statsValTxt:SetPoint("TOP", statsDisplay, "BOTTOM", 0, -2)
@@ -1030,7 +1243,8 @@ panel:SetScript("OnShow", function(self)
             local enabled = ABCReminderDB.showSessionResults
             for _, r in ipairs(radios) do
                 r.btn:SetEnabled(enabled)
-                if r.lbl then r.lbl:SetTextColor(enabled and 1 or 0.5, enabled and 1 or 0.5, enabled and 1 or 0.5) end
+                local c = enabled and 1 or 0.5
+                r.lbl:SetTextColor(c, c, c)
             end
         end
 
@@ -1046,7 +1260,7 @@ panel:SetScript("OnShow", function(self)
             prevAnchor = btn
         end
 
-        SetRadioDisplay(ABCReminderDB.sessionDisplay or "window")
+        SetRadioDisplay(ABCReminderDB.sessionDisplay or "chat")
         UpdateRadioState()
 
         showResultsCb:SetScript("OnClick", function(cb)
@@ -1056,8 +1270,14 @@ panel:SetScript("OnShow", function(self)
 
         local lastRadio = radios[#radios].btn
 
+        local wipesCb = CreateFrame("CheckButton", nil, C, "InterfaceOptionsCheckButtonTemplate")
+        wipesCb:SetPoint("TOPLEFT", lastRadio, "BOTTOMLEFT", -20, -8)
+        wipesCb.Text:SetText("Record wipes and abandoned keys in history (never counted as records)")
+        wipesCb:SetChecked(ABCReminderDB.recordWipes)
+        wipesCb:SetScript("OnClick", function(cb) ABCReminderDB.recordWipes = cb:GetChecked() end)
+
         local minDurSlider = CreateFrame("Slider", "ABCRMinBossDur", C, "OptionsSliderTemplate")
-        minDurSlider:SetPoint("TOPLEFT", lastRadio, "BOTTOMLEFT", -20, -22)
+        minDurSlider:SetPoint("TOPLEFT", wipesCb, "BOTTOMLEFT", 0, -28)
         minDurSlider:SetMinMaxValues(0, 120); minDurSlider:SetValueStep(5); minDurSlider:SetObeyStepOnDrag(true)
         minDurSlider:SetValue(ABCReminderDB.minRaidBossDuration)
         minDurSlider.Text:SetJustifyH("LEFT"); minDurSlider.Text:ClearAllPoints()
@@ -1076,30 +1296,31 @@ panel:SetScript("OnShow", function(self)
         resetStatsBtn:SetSize(160, 22); resetStatsBtn:SetText("Reset All Statistics")
         resetStatsBtn:SetScript("OnClick", function()
             CharABCRDB.statistics = { perInstance={}, perBoss={} }
-            CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=true }
-            lastCombatTime, lastCombatIdle = 0, 0
+            ResetSession()
+            if historyFrame:IsShown() then RefreshHistoryFrame() end
             print("|cffff9900ABCReminder:|r All statistics reset.")
         end)
     end
 
-    -- Refresh des valeurs dynamiques à chaque ouverture (pas seulement à l'init)
     RefreshPanelDynamic()
 end)
 
 local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
 Settings.RegisterAddOnCategory(category)
 
+local function OpenOptions()
+    if category:GetID() then Settings.OpenToCategory(category:GetID())
+    else Settings.OpenToCategory(panel.name) end
+end
+
 -- =========================
 -- Slash Commands
 -- =========================
 SLASH_ABCREMINDER1 = "/ar"
 SlashCmdList.ABCREMINDER = function(msg)
-    if msg == "move" then
-        isMovingSQW = not isMovingSQW
-        sqwFrame:EnableMouse(isMovingSQW); sqwFrame:SetMovable(isMovingSQW)
-        print("ABC: Move Mode "..(isMovingSQW and "|cff00ff00ON|r (Drag the blue box)" or "|cffff0000OFF|r"))
-    elseif msg == "stats" or msg == "history" then
-        ShowHistoryFrame(); print("ABC: Showing history.")
+    msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if msg == "stats" or msg == "history" then
+        ShowHistoryFrame()
     elseif msg == "raid" then
         ShowHistoryFrame("raid")
     elseif msg == "mythic" or msg == "m+" then
@@ -1107,26 +1328,24 @@ SlashCmdList.ABCREMINDER = function(msg)
     elseif msg == "session" then
         UpdateSessionFrame()
     elseif msg == "reset session" then
-        CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=true }
-        lastCombatTime, lastCombatIdle = 0, 0
+        ResetSession()
         print("ABC: Session reset.")
     else
-        if category:GetID() then Settings.OpenToCategory(category:GetID())
-        else Settings.OpenToCategory(panel.name) end
+        OpenOptions()
     end
 end
 
 -- =========================
 -- Addon Compartment
 -- =========================
-
 local menuCompartment = CreateFrame("Frame", "ABCReminderCompartmentMenu", UIParent, "UIDropDownMenuTemplate")
 
 function ABCReminder_OnAddonCompartmentClick(addonName, button)
     if button == "RightButton" then
         UIDropDownMenu_Initialize(menuCompartment, function(_, level)
             local info = UIDropDownMenu_CreateInfo()
-            info.text, info.func = "Open Options", function() Settings.OpenToCategory(category:GetID()) end
+            info.notCheckable = true
+            info.text, info.func = "Open Options", OpenOptions
             UIDropDownMenu_AddButton(info, level)
             info.text, info.func = "History (Raid)",    function() ShowHistoryFrame("raid")   end
             UIDropDownMenu_AddButton(info, level)
@@ -1135,15 +1354,13 @@ function ABCReminder_OnAddonCompartmentClick(addonName, button)
             info.text, info.func = "Session Stats", function() UpdateSessionFrame() end
             UIDropDownMenu_AddButton(info, level)
             info.text, info.func = "Reset Session Stats", function()
-                CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=true }
-                lastCombatTime, lastCombatIdle = 0, 0
+                ResetSession()
                 print("ABC: Session statistics reset.")
             end
             UIDropDownMenu_AddButton(info, level)
         end)
         ToggleDropDownMenu(1, nil, menuCompartment, "cursor", 0, 0)
     else
-        -- Toggle enable/disable + sync immédiat du panneau si ouvert
         CharABCRDB.enabled = not CharABCRDB.enabled
         if panel:IsShown() then RefreshPanelDynamic() end
         print("ABC: "..(CharABCRDB.enabled and "|cff00ff00Enabled|r for this character." or "|cffff0000Disabled|r for this character."))
