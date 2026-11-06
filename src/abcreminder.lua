@@ -142,11 +142,33 @@ end
 -- Movement is tracked from PLAYER_STARTED/STOPPED_MOVING (events carry no secret values)
 local playerMoving = false
 
+-- Loss-of-control types that still let you cast: idle time under these is not excused
+local CC_IGNORED = { ROOT = true, DISARM = true }
+
+-- Stunned, feared, disoriented/incapacitated (polymorph, sap…), charmed, silenced,
+-- pacified or school-locked. Roots and disarms don't count.
+local function IsCrowdControlled()
+    -- the game took control away (stun, fear, polymorph, disorient, mind control…)
+    if SafeCall(HasFullControl) == false then return true end
+    local LoC = C_LossOfControl
+    if not (LoC and LoC.GetActiveLossOfControlData) then return false end
+    local n = SafeCall(LoC.GetActiveLossOfControlDataCount)
+    if type(n) ~= "number" then return false end
+    for i = 1, math.min(n, 10) do
+        local ok, data = pcall(LoC.GetActiveLossOfControlData, i)
+        if ok and type(Readable(data)) == "table" then
+            local locType = Readable(data.locType)
+            -- an effect we can't identify is not counted (could be a root)
+            if type(locType) == "string" and not CC_IGNORED[locType] then return true end
+        end
+    end
+    return false
+end
+
 -- Why is the player idle right now? "cc" (loss of control), "move", or "still"
 local function IdleReason()
-    if SafeCall(HasFullControl) == false then return "cc" end
-    local n = C_LossOfControl and SafeCall(C_LossOfControl.GetActiveLossOfControlDataCount)
-    if type(n) == "number" and n > 0 then return "cc" end
+    local ok, cc = pcall(IsCrowdControlled)
+    if ok and cc then return "cc" end
     if playerMoving or SafeCall(IsFalling) == true then return "move" end
     return "still"
 end
