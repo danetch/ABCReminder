@@ -152,7 +152,7 @@ local WEAPON_SPECS = {
     [263] = true,                              -- Shaman: Enhancement
     [268] = true, [269] = true,                -- Monk: Brewmaster, Windwalker
     [577] = true, [581] = true,                -- Demon Hunter: Havoc, Vengeance
-    [103] = true, [104] = true,                -- Druid: Feral, Guardian
+    -- Feral / Guardian druids fight with their form, not their weapon: not listed
 }
 
 local function CurrentSpecNeedsWeapon()
