@@ -142,11 +142,35 @@ end
 -- Movement is tracked from PLAYER_STARTED/STOPPED_MOVING (events carry no secret values)
 local playerMoving = false
 
--- Loss-of-control types that still let you cast: idle time under these is not excused
-local CC_IGNORED = { ROOT = true, DISARM = true }
+-- Specs whose abilities need their weapon: for them a disarm is real CC
+local WEAPON_SPECS = {
+    [71] = true, [72] = true, [73] = true,     -- Warrior: Arms, Fury, Protection
+    [70] = true, [66] = true,                  -- Paladin: Retribution, Protection
+    [253] = true, [254] = true, [255] = true,  -- Hunter: Beast Mastery, Marksmanship, Survival
+    [259] = true, [260] = true, [261] = true,  -- Rogue: Assassination, Outlaw, Subtlety
+    [250] = true, [251] = true, [252] = true,  -- Death Knight: Blood, Frost, Unholy
+    [263] = true,                              -- Shaman: Enhancement
+    [268] = true, [269] = true,                -- Monk: Brewmaster, Windwalker
+    [577] = true, [581] = true,                -- Demon Hunter: Havoc, Vengeance
+    [103] = true, [104] = true,                -- Druid: Feral, Guardian
+}
+
+local function CurrentSpecNeedsWeapon()
+    local idx = GetSpecialization()
+    local specID = idx and GetSpecializationInfo(idx)
+    return specID and WEAPON_SPECS[specID] or false
+end
+
+-- Loss-of-control types that don't stop you acting: idle time under these is not excused.
+-- Roots never count; a disarm only counts for weapon specs.
+local function IsIgnoredLoC(locType)
+    if locType == "ROOT" then return true end
+    if locType == "DISARM" then return not CurrentSpecNeedsWeapon() end
+    return false
+end
 
 -- Stunned, feared, disoriented/incapacitated (polymorph, sap…), charmed, silenced,
--- pacified or school-locked. Roots and disarms don't count.
+-- pacified or school-locked; disarmed for weapon specs. Roots don't count.
 local function IsCrowdControlled()
     -- the game took control away (stun, fear, polymorph, disorient, mind control…)
     if SafeCall(HasFullControl) == false then return true end
@@ -159,7 +183,7 @@ local function IsCrowdControlled()
         if ok and type(Readable(data)) == "table" then
             local locType = Readable(data.locType)
             -- an effect we can't identify is not counted (could be a root)
-            if type(locType) == "string" and not CC_IGNORED[locType] then return true end
+            if type(locType) == "string" and not IsIgnoredLoC(locType) then return true end
         end
     end
     return false
