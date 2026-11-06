@@ -124,13 +124,30 @@ local function NewFight()
     return { time = 0, idle = 0, idleMove = 0, idleCC = 0, gaps = 0, longestGap = 0, curGap = 0 }
 end
 
+-- Midnight: some APIs return "secret" values in combat that addons may not compare.
+-- Readable(v) returns v only when it can be used safely, nil otherwise.
+local function Readable(v)
+    if v == nil then return nil end
+    if issecretvalue and issecretvalue(v) then return nil end
+    return v
+end
+
+local function SafeCall(fn, ...)
+    if not fn then return nil end
+    local ok, v = pcall(fn, ...)
+    if not ok then return nil end
+    return Readable(v)
+end
+
+-- Movement is tracked from PLAYER_STARTED/STOPPED_MOVING (events carry no secret values)
+local playerMoving = false
+
 -- Why is the player idle right now? "cc" (loss of control), "move", or "still"
 local function IdleReason()
-    if C_LossOfControl and C_LossOfControl.GetActiveLossOfControlDataCount then
-        local ok, n = pcall(C_LossOfControl.GetActiveLossOfControlDataCount)
-        if ok and type(n) == "number" and n > 0 then return "cc" end
-    end
-    if (GetUnitSpeed("player") or 0) > 0 or IsFalling() then return "move" end
+    if SafeCall(HasFullControl) == false then return "cc" end
+    local n = C_LossOfControl and SafeCall(C_LossOfControl.GetActiveLossOfControlDataCount)
+    if type(n) == "number" and n > 0 then return "cc" end
+    if playerMoving or SafeCall(IsFalling) == true then return "move" end
     return "still"
 end
 
@@ -962,6 +979,8 @@ frame:RegisterEvent("CHALLENGE_MODE_START")
 frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
 frame:RegisterEvent("CHALLENGE_MODE_RESET")
 frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+frame:RegisterEvent("PLAYER_STARTED_MOVING")
+frame:RegisterEvent("PLAYER_STOPPED_MOVING")
 
 local function OnUpdate(_, delta)
     if not inCombat then return end
@@ -980,7 +999,8 @@ local function OnUpdate(_, delta)
     else
         fight.idle   = fight.idle + delta
         fight.curGap = fight.curGap + delta
-        local reason = IdleReason()
+        local ok, reason = pcall(IdleReason)  -- never let this break the reminder
+        if not ok then reason = "still" end
         if reason == "move" then fight.idleMove = fight.idleMove + delta
         elseif reason == "cc" then fight.idleCC = fight.idleCC + delta end
     end
@@ -1014,6 +1034,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         self:SetScript("OnUpdate", OnUpdate)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
+        playerMoving = SafeCall(IsPlayerMoving) == true
         local _, instanceType = IsInInstance()
         if instanceType and instanceType ~= "none" then
             CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, idleMove=0, idleCC=0, outsideOnly=false }
@@ -1031,6 +1052,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
         elseif keyActive and not mplus then
             StartMPlusSession(true)
         end
+
+    elseif event == "PLAYER_STARTED_MOVING" then
+        playerMoving = true
+
+    elseif event == "PLAYER_STOPPED_MOVING" then
+        playerMoving = false
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
         if panel and panel:IsShown() then RefreshPanelDynamic() end
