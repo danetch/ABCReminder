@@ -1,7 +1,7 @@
 ## Interface: 120105, 120100, 120007, 120005, 120001, 120000
 ## Title: ABC Reminder
 ## Notes: Reminds you to always be casting your spells
-## Version: 12.1.0
+## Version: @project-version@
 ## Author: Danetch
 ## IconTexture: Interface\AddOns\ABCReminder\img\drop.tga
 ## AddonCompartmentFunc: ABCReminder_OnAddonCompartmentClick

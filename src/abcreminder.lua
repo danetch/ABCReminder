@@ -29,7 +29,7 @@ local CHAR_DEFAULTS = {
     enabled = true,
     disabledSpecs = {},  -- specID (number) => true si désactivé
     statistics = { perInstance = {}, perBoss = {} },
-    sessionTrivial = { totalTime = 0, idleTime = 0, outsideOnly = true },
+    sessionTrivial = { totalTime = 0, idleTime = 0, idleMove = 0, idleCC = 0, outsideOnly = true },
 }
 
 -- Raid difficulty IDs per filter group (IDs are language-independent)
@@ -121,7 +121,86 @@ end
 -- Fight accumulator
 -- =========================
 local function NewFight()
-    return { time = 0, idle = 0, gaps = 0, longestGap = 0, curGap = 0 }
+    return { time = 0, idle = 0, idleMove = 0, idleCC = 0, gaps = 0, longestGap = 0, curGap = 0 }
+end
+
+-- Midnight: some APIs return "secret" values in combat that addons may not compare.
+-- Readable(v) returns v only when it can be used safely, nil otherwise.
+local function Readable(v)
+    if v == nil then return nil end
+    if issecretvalue and issecretvalue(v) then return nil end
+    return v
+end
+
+local function SafeCall(fn, ...)
+    if not fn then return nil end
+    local ok, v = pcall(fn, ...)
+    if not ok then return nil end
+    return Readable(v)
+end
+
+-- Movement is tracked from PLAYER_STARTED/STOPPED_MOVING (events carry no secret values)
+local playerMoving = false
+
+-- Specs whose abilities need their weapon: for them a disarm is real CC
+local WEAPON_SPECS = {
+    [71] = true, [72] = true, [73] = true,     -- Warrior: Arms, Fury, Protection
+    [70] = true, [66] = true,                  -- Paladin: Retribution, Protection
+    [253] = true, [254] = true, [255] = true,  -- Hunter: Beast Mastery, Marksmanship, Survival
+    [259] = true, [260] = true, [261] = true,  -- Rogue: Assassination, Outlaw, Subtlety
+    [250] = true, [251] = true, [252] = true,  -- Death Knight: Blood, Frost, Unholy
+    [263] = true,                              -- Shaman: Enhancement
+    [268] = true, [269] = true,                -- Monk: Brewmaster, Windwalker
+    [577] = true, [581] = true,                -- Demon Hunter: Havoc, Vengeance
+    -- Feral / Guardian druids fight with their form, not their weapon: not listed
+}
+
+local function CurrentSpecNeedsWeapon()
+    local idx = GetSpecialization()
+    local specID = idx and GetSpecializationInfo(idx)
+    return specID and WEAPON_SPECS[specID] or false
+end
+
+-- Loss-of-control types that don't stop you acting: idle time under these is not excused.
+-- Roots never count; a disarm only counts for weapon specs.
+local function IsIgnoredLoC(locType)
+    if locType == "ROOT" then return true end
+    if locType == "DISARM" then return not CurrentSpecNeedsWeapon() end
+    return false
+end
+
+-- Stunned, feared, disoriented/incapacitated (polymorph, sap…), charmed, silenced,
+-- pacified or school-locked; disarmed for weapon specs. Roots don't count.
+local function IsCrowdControlled()
+    -- the game took control away (stun, fear, polymorph, disorient, mind control…)
+    if SafeCall(HasFullControl) == false then return true end
+    local LoC = C_LossOfControl
+    if not (LoC and LoC.GetActiveLossOfControlData) then return false end
+    local n = SafeCall(LoC.GetActiveLossOfControlDataCount)
+    if type(n) ~= "number" then return false end
+    for i = 1, math.min(n, 10) do
+        local ok, data = pcall(LoC.GetActiveLossOfControlData, i)
+        if ok and type(Readable(data)) == "table" then
+            local locType = Readable(data.locType)
+            -- an effect we can't identify is not counted (could be a root)
+            if type(locType) == "string" and not IsIgnoredLoC(locType) then return true end
+        end
+    end
+    return false
+end
+
+-- Why is the player idle right now? "cc" (loss of control), "move", or "still"
+local function IdleReason()
+    local ok, cc = pcall(IsCrowdControlled)
+    if ok and cc then return "cc" end
+    if playerMoving or SafeCall(IsFalling) == true then return "move" end
+    return "still"
+end
+
+-- Idle time split by reason; older records without the split count as "still"
+local function IdleSplit(f)
+    local move, cc = f.idleMove or 0, f.idleCC or 0
+    return move, cc, math.max(0, (f.idle or 0) - move - cc)
 end
 
 local function CloseGap(f)
@@ -135,6 +214,8 @@ end
 local function AddFight(dst, src)
     dst.time = dst.time + src.time
     dst.idle = dst.idle + src.idle
+    dst.idleMove = (dst.idleMove or 0) + (src.idleMove or 0)
+    dst.idleCC   = (dst.idleCC   or 0) + (src.idleCC   or 0)
     dst.gaps = dst.gaps + src.gaps
     if src.longestGap > dst.longestGap then dst.longestGap = src.longestGap end
 end
@@ -142,7 +223,7 @@ end
 local function MakeAttempt(f, success)
     return {
         date = GetTimestamp(), time = f.time, idle = f.idle,
-        gaps = f.gaps, longestGap = f.longestGap, kill = success and true or false,
+        idleMove = f.idleMove, idleCC = f.idleCC, gaps = f.gaps, longestGap = f.longestGap, kill = success and true or false,
     }
 end
 
@@ -280,6 +361,16 @@ resultFrame.closeBtn = CreateFrame("Button", nil, resultFrame, "UIPanelCloseButt
 resultFrame.closeBtn:SetPoint("TOPRIGHT", -3, -4)
 resultFrame.closeBtn:SetScript("OnClick", function() resultFrame:Hide() end)
 
+-- "3.1s moving, 1.9s standing still" (chat / tooltips)
+local function IdleSplitText(f)
+    local move, cc, still = IdleSplit(f)
+    local parts = {}
+    if move  >= 0.05 then parts[#parts+1] = string.format("%.1fs moving", move) end
+    if cc    >= 0.05 then parts[#parts+1] = string.format("%.1fs CC", cc) end
+    if still >= 0.05 then parts[#parts+1] = string.format("%.1fs standing still", still) end
+    return table.concat(parts, ", ")
+end
+
 -- Common "how did this pull go" lines
 local function FightLines(f, prev)
     local active = ActivePct(f.time, f.idle)
@@ -288,6 +379,13 @@ local function FightLines(f, prev)
     lines[#lines+1] = "Active: " .. ColorPct(active) .. FormatDelta(delta, " vs last")
     lines[#lines+1] = string.format("Combat: |cffffffff%s|r   Idle: |cffffffff%.1fs|r",
         FormatDuration(f.time), f.idle)
+    if f.idle >= 0.05 then
+        local move, cc, still = IdleSplit(f)
+        local split = string.format("  |cff88ccffmoving %.1fs|r", move)
+        if cc >= 0.05 then split = split .. string.format("  |cffcc88ffCC %.1fs|r", cc) end
+        split = split .. string.format("  |cffffcc66standing still %.1fs|r", still)
+        lines[#lines+1] = split
+    end
     if f.gaps > 0 then
         lines[#lines+1] = string.format("Idle gaps (>%ds): |cffffffff%d|r   longest |cffffffff%.1fs|r",
             GAP_MIN, f.gaps, f.longestGap)
@@ -325,7 +423,7 @@ statsTable.content:SetWidth(206); statsTable.content:SetJustifyH("LEFT")
 statsTable.content:SetSpacing(2)
 
 local function ResetSession()
-    CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=true }
+    CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, idleMove=0, idleCC=0, outsideOnly=true }
     lastFight = nil
 end
 
@@ -346,19 +444,27 @@ UpdateSessionFrame = function()
     if lf then
         lines[#lines+1] = string.format("Last:     %s  idle %.1fs / %s",
             ColorPct(ActivePct(lf.time, lf.idle)), lf.idle, FormatDuration(lf.time))
+        if lf.idle >= 0.05 then lines[#lines+1] = "   |cffaaaaaa" .. IdleSplitText(lf) .. "|r" end
     else
         lines[#lines+1] = "Last:     |cff888888-|r"
     end
     lines[#lines+1] = string.format("Session: %s  idle %s / %s",
         ColorPct(sessActive), FormatDuration(st.idleTime), FormatDuration(st.totalTime))
+    if (st.idleTime or 0) >= 0.05 then
+        lines[#lines+1] = "   |cffaaaaaa" .. IdleSplitText({ idle = st.idleTime, idleMove = st.idleMove, idleCC = st.idleCC }) .. "|r"
+    end
     statsTable.content:SetText(table.concat(lines, "\n"))
 
     if not ABCReminderDB.showSessionResults then return end
     if ABCReminderDB.sessionDisplay == "window" then
         ShowWithAutoHide(statsTable)
     else
-        local lastStr = lf and string.format(" | Last: %.1f%% (%s, %d gaps)",
-            ActivePct(lf.time, lf.idle), FormatDuration(lf.time), lf.gaps) or ""
+        local lastStr = ""
+        if lf then
+            lastStr = string.format(" | Last: %.1f%% (%s", ActivePct(lf.time, lf.idle), FormatDuration(lf.time))
+            if lf.idle >= 0.05 then lastStr = lastStr .. ", idle " .. IdleSplitText(lf) end
+            lastStr = lastStr .. ")"
+        end
         ABCPrint(string.format("Session: %.1f%% active over %s%s",
             sessActive, FormatDuration(st.totalTime), lastStr))
     end
@@ -469,7 +575,13 @@ local function AttemptTooltipLine(a, isMPlus)
             ColorPct(active), status)
     end
     status = a.kill and "|cff00ff00kill|r" or "|cffff4040wipe|r"
-    return string.format("%s  %s  %s  %s", a.date or "?", FormatDuration(a.time), ColorPct(active), status)
+    local line = string.format("%s  %s  %s  %s", a.date or "?", FormatDuration(a.time), ColorPct(active), status)
+    if a.idleMove then  -- older attempts have no split
+        local move, cc, still = IdleSplit(a)
+        line = line .. string.format("  |cff888888still %.1fs / moving %.1fs%s|r", still, move,
+            cc >= 0.05 and string.format(" / CC %.1fs", cc) or "")
+    end
+    return line
 end
 
 local rowPool = {}
@@ -753,8 +865,9 @@ local function EndMPlusSession(completed)
     end
     if completed then Concat(lines, BestLines(data, isRecord, isFirst, gain, "First run recorded")) end
     ShowResultFrame(title, lines)
-    ABCPrint(string.format("%s%s: %.1f%% active over %s%s", m.name, lvlStr, ActivePct(f.time, f.idle),
-        FormatDuration(f.time), completed and "" or " (abandoned)"))
+    ABCPrint(string.format("%s%s: %.1f%% active over %s%s%s", m.name, lvlStr, ActivePct(f.time, f.idle),
+        FormatDuration(f.time), completed and "" or " (abandoned)",
+        f.idle >= 0.05 and (" | idle " .. IdleSplitText(f)) or ""))
 end
 
 -- =========================
@@ -779,6 +892,8 @@ local function FlushTrash(label)
     local st = CharABCRDB.sessionTrivial
     st.totalTime = st.totalTime + f.time
     st.idleTime  = st.idleTime  + f.idle
+    st.idleMove  = (st.idleMove or 0) + f.idleMove
+    st.idleCC    = (st.idleCC   or 0) + f.idleCC
 
     if ABCReminderDB.showSessionResults and ABCReminderDB.sessionDisplay == "window" then
         local lines = FightLines(f, nil)
@@ -846,8 +961,9 @@ local function FinishRaidBoss(encounterName, difficultyID, success)
     local lines = FightLines(f, success and prev or nil)
     if success then Concat(lines, BestLines(data, isRecord, isFirst, gain, "First kill recorded")) end
     ShowResultFrame(title, lines)
-    ABCPrint(string.format("%s: %.1f%% active over %s%s", display, ActivePct(f.time, f.idle),
-        FormatDuration(f.time), success and "" or " (wipe)"))
+    ABCPrint(string.format("%s: %.1f%% active over %s%s%s", display, ActivePct(f.time, f.idle),
+        FormatDuration(f.time), success and "" or " (wipe)",
+        f.idle >= 0.05 and (" | idle " .. IdleSplitText(f)) or ""))
 end
 
 local function OnEncounterEnd(encounterName, difficultyID, success)
@@ -909,6 +1025,8 @@ frame:RegisterEvent("CHALLENGE_MODE_START")
 frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
 frame:RegisterEvent("CHALLENGE_MODE_RESET")
 frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+frame:RegisterEvent("PLAYER_STARTED_MOVING")
+frame:RegisterEvent("PLAYER_STOPPED_MOVING")
 
 local function OnUpdate(_, delta)
     if not inCombat then return end
@@ -927,6 +1045,10 @@ local function OnUpdate(_, delta)
     else
         fight.idle   = fight.idle + delta
         fight.curGap = fight.curGap + delta
+        local ok, reason = pcall(IdleReason)  -- never let this break the reminder
+        if not ok then reason = "still" end
+        if reason == "move" then fight.idleMove = fight.idleMove + delta
+        elseif reason == "cc" then fight.idleCC = fight.idleCC + delta end
     end
 
     checkElapsed = checkElapsed + delta
@@ -958,9 +1080,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         self:SetScript("OnUpdate", OnUpdate)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
+        playerMoving = SafeCall(IsPlayerMoving) == true
         local _, instanceType = IsInInstance()
         if instanceType and instanceType ~= "none" then
-            CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, outsideOnly=false }
+            CharABCRDB.sessionTrivial = { totalTime=0, idleTime=0, idleMove=0, idleCC=0, outsideOnly=false }
             lastFight = nil
         end
         -- encounter that ended while we were away (release, disconnect…)
@@ -975,6 +1098,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
         elseif keyActive and not mplus then
             StartMPlusSession(true)
         end
+
+    elseif event == "PLAYER_STARTED_MOVING" then
+        playerMoving = true
+
+    elseif event == "PLAYER_STOPPED_MOVING" then
+        playerMoving = false
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
         if panel and panel:IsShown() then RefreshPanelDynamic() end
