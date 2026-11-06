@@ -24,6 +24,7 @@ ABCReminder tracks how much time you spend idle (not casting, channeling or on t
 - **Active %**, compared with your previous kill of the same boss / run of the same dungeon
 - **Combat time and idle time**
 - **Idle gaps**: how many times you stayed idle for more than 1 second, and the longest gap
+- **Why you were idle**: idle time split into *moving* (running, falling), *CC* (stunned, feared, silenced…) and *standing still* — the part you can actually fix
 - **Personal best**, with a fanfare when you beat it (no fanfare for a first kill)
 - **Wipes** are shown too (greyed), but never count as records
 
